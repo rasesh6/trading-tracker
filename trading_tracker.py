@@ -110,8 +110,11 @@ def parse_option_symbol(symbol):
 def update_data():
     """Fetch latest data and update database"""
     try:
+        print("Starting data update...")
         token = get_access_token()
+        print(f"Got access token: {token[:10]}..." if token else "No token")
         account_id = get_account_id(token)
+        print(f"Got account ID: {account_id}")
 
         # Fetch YTD data
         now = datetime.now()
@@ -126,7 +129,9 @@ def update_data():
 
         # Store trades
         transactions = history.get('transactions', [])
+        print(f"Total transactions: {len(transactions)}")
         trade_txs = [t for t in transactions if t.get('type') == 'TRADE' and t.get('subType') == 'TRADE']
+        print(f"Trade transactions: {len(trade_txs)}")
 
         for tx in trade_txs:
             tx_id = tx.get('id')
@@ -155,6 +160,9 @@ def update_data():
 
         return {'status': 'success', 'updated': datetime.now().isoformat()}
     except Exception as e:
+        print(f"Error updating data: {e}")
+        import traceback
+        traceback.print_exc()
         return {'status': 'error', 'message': str(e)}
 
 def get_stats():
