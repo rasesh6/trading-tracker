@@ -176,38 +176,83 @@ def update_data():
 
         print(f"Processing {len(all_trades)} trades in chronological order")
 
-        # Group by symbol and track open positions
+        # Track positions: symbol -> list of (quantity, price, tx_id, fee, is_long)
+        # is_long = True for long positions (BUY to open), False for short positions (SELL to open)
         from collections import defaultdict, deque
 
-        open_positions = defaultdict(deque)  # symbol -> deque of (quantity, price, tx_id, fee)
+        long_positions = defaultdict(deque)  # Opening BUYs
+        short_positions = defaultdict(deque)  # Opening SELLs (short positions)
         realized_pl = {}  # tx_id -> P&L (only for closing trades)
 
         for tx_id, symbol, side, quantity, price, timestamp, fee in all_trades:
             if side == 'BUY':
-                open_positions[symbol].append((quantity, price, tx_id, fee))
-                print(f"  BUY: {symbol} qty={quantity} price=${price} fee=${fee}")
-            elif side == 'SELL':
-                quantity_to_close = abs(quantity)
-                print(f"  SELL: {symbol} qty={quantity} price=${price} fee=${fee}")
-                while quantity_to_close > 0 and open_positions[symbol]:
-                    open_qty, open_price, open_tx_id, open_fee = open_positions[symbol][0]
-                    close_qty = min(quantity_to_close, open_qty)
+                # BUY can either:
+                # 1. Open a long position (if no short positions to close)
+                # 2. Close a short position (buy to cover)
+                quantity_to_process = quantity
 
-                    # P&L for this closed position: (sell - buy) * quantity - both fees
+                # First, try to close any existing short positions
+                while quantity_to_process > 0 and short_positions[symbol]:
+                    open_qty, open_price, open_tx_id, open_fee = short_positions[symbol][0]
+                    close_qty = min(quantity_to_process, open_qty)
+
+                    # Closing short: P&L = (open_price - close_price) * quantity - fees
+                    # We profit when price goes down (bought back cheaper)
+                    trading_pl = (open_price - price) * close_qty
+                    total_pl = trading_pl - open_fee - fee
+
+                    print(f"  CLOSE SHORT: {symbol} bought ${price} to close short opened at ${open_price} × {close_qty} = P&L ${total_pl}")
+
+                    # Assign P&L to the closing (BUY) trade
+                    realized_pl[tx_id] = realized_pl.get(tx_id, 0) + total_pl
+                    # Also assign to the opening SELL for tracking
+                    realized_pl[open_tx_id] = realized_pl.get(open_tx_id, 0) + total_pl
+
+                    if open_qty == close_qty:
+                        short_positions[symbol].popleft()
+                    else:
+                        short_positions[symbol][0] = (open_qty - close_qty, open_price, open_tx_id, open_fee)
+
+                    quantity_to_process -= close_qty
+
+                # Any remaining quantity opens a new long position
+                if quantity_to_process > 0:
+                    long_positions[symbol].append((quantity_to_process, price, tx_id, fee))
+                    print(f"  OPEN LONG: {symbol} bought {quantity_to_process} @ ${price} fee=${fee}")
+
+            elif side == 'SELL':
+                # SELL can either:
+                # 1. Open a short position (selling to open)
+                # 2. Close a long position (selling to close)
+                quantity_to_process = abs(quantity)
+
+                # First, try to close any existing long positions
+                while quantity_to_process > 0 and long_positions[symbol]:
+                    open_qty, open_price, open_tx_id, open_fee = long_positions[symbol][0]
+                    close_qty = min(quantity_to_process, open_qty)
+
+                    # Closing long: P&L = (close_price - open_price) * quantity - fees
                     trading_pl = (price - open_price) * close_qty
                     total_pl = trading_pl - open_fee - fee
 
-                    print(f"    Matched: close ${price} with open ${open_price} × {close_qty} = P&L ${total_pl}")
+                    print(f"  CLOSE LONG: {symbol} sold ${price} to close long opened at ${open_price} × {close_qty} = P&L ${total_pl}")
 
-                    # Only assign P&L to the closing (SELL) trade
+                    # Assign P&L to the closing (SELL) trade
                     realized_pl[tx_id] = realized_pl.get(tx_id, 0) + total_pl
+                    # Also assign to the opening BUY for tracking
+                    realized_pl[open_tx_id] = realized_pl.get(open_tx_id, 0) + total_pl
 
                     if open_qty == close_qty:
-                        open_positions[symbol].popleft()
+                        long_positions[symbol].popleft()
                     else:
-                        open_positions[symbol][0] = (open_qty - close_qty, open_price, open_tx_id, open_fee)
+                        long_positions[symbol][0] = (open_qty - close_qty, open_price, open_tx_id, open_fee)
 
-                    quantity_to_close -= close_qty
+                    quantity_to_process -= close_qty
+
+                # Any remaining quantity opens a new short position
+                if quantity_to_process > 0:
+                    short_positions[symbol].append((quantity_to_process, price, tx_id, fee))
+                    print(f"  OPEN SHORT: {symbol} sold {quantity_to_process} @ ${price} fee=${fee}")
 
         # Reset all P&L to 0 first, then update only closed positions
         c.execute('''UPDATE trades SET realized_pl = 0''')
