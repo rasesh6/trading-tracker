@@ -171,8 +171,10 @@ def update_data():
                 (tx_id, symbol, side, quantity, price, timestamp, opt_type or 'STOCK', strike, expiration, fees))
 
         # Calculate realized P&L using FIFO matching
-        c.execute('''SELECT transaction_id, symbol, side, quantity, price, timestamp, fee_amount FROM trades ORDER BY timestamp''')
+        c.execute('''SELECT transaction_id, symbol, side, quantity, price, timestamp, fee_amount FROM trades ORDER BY datetime(timestamp) ASC''')
         all_trades = c.fetchall()
+
+        print(f"Processing {len(all_trades)} trades in chronological order")
 
         # Group by symbol and track open positions
         from collections import defaultdict, deque
@@ -183,8 +185,10 @@ def update_data():
         for tx_id, symbol, side, quantity, price, timestamp, fee in all_trades:
             if side == 'BUY':
                 open_positions[symbol].append((quantity, price, tx_id, fee))
+                print(f"  BUY: {symbol} qty={quantity} price=${price} fee=${fee}")
             elif side == 'SELL':
                 quantity_to_close = abs(quantity)
+                print(f"  SELL: {symbol} qty={quantity} price=${price} fee=${fee}")
                 while quantity_to_close > 0 and open_positions[symbol]:
                     open_qty, open_price, open_tx_id, open_fee = open_positions[symbol][0]
                     close_qty = min(quantity_to_close, open_qty)
@@ -192,6 +196,8 @@ def update_data():
                     # P&L for this closed position: (sell - buy) * quantity - both fees
                     trading_pl = (price - open_price) * close_qty
                     total_pl = trading_pl - open_fee - fee
+
+                    print(f"    Matched: close ${price} with open ${open_price} × {close_qty} = P&L ${total_pl}")
 
                     # Only assign P&L to the closing (SELL) trade
                     realized_pl[tx_id] = realized_pl.get(tx_id, 0) + total_pl
