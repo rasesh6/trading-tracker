@@ -30,8 +30,15 @@ def init_db():
         type TEXT,
         strike TEXT,
         expiration TEXT,
-        realized_pl REAL DEFAULT 0
+        realized_pl REAL DEFAULT 0,
+        fee_amount REAL DEFAULT 0
     )''')
+
+    # Add fee_amount column if it doesn't exist (for existing databases)
+    try:
+        c.execute('''ALTER TABLE trades ADD COLUMN fee_amount REAL DEFAULT 0''')
+    except:
+        pass  # Column already exists
 
     # Daily summary table
     c.execute('''CREATE TABLE IF NOT EXISTS daily_summary (
@@ -159,53 +166,49 @@ def update_data():
             opt_type, strike, expiration = parse_option_symbol(symbol)
 
             c.execute('''INSERT OR REPLACE INTO trades
-                (transaction_id, symbol, side, quantity, price, timestamp, type, strike, expiration, realized_pl)
+                (transaction_id, symbol, side, quantity, price, timestamp, type, strike, expiration, fee_amount)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                (tx_id, symbol, side, quantity, price, timestamp, opt_type or 'STOCK', strike, expiration, -fees))
+                (tx_id, symbol, side, quantity, price, timestamp, opt_type or 'STOCK', strike, expiration, fees))
 
         # Calculate realized P&L using FIFO matching
-        c.execute('''SELECT transaction_id, symbol, side, quantity, price, timestamp, realized_pl FROM trades ORDER BY timestamp''')
+        c.execute('''SELECT transaction_id, symbol, side, quantity, price, timestamp, fee_amount FROM trades ORDER BY timestamp''')
         all_trades = c.fetchall()
 
         # Group by symbol and track open positions
         from collections import defaultdict, deque
 
-        open_positions = defaultdict(deque)  # symbol -> deque of (quantity, price, tx_id, initial_fees)
-        realized_pl = {}  # tx_id -> P&L
+        open_positions = defaultdict(deque)  # symbol -> deque of (quantity, price, tx_id, fee)
+        realized_pl = {}  # tx_id -> P&L (only for closing trades)
 
-        for tx_id, symbol, side, quantity, price, timestamp, initial_fees in all_trades:
+        for tx_id, symbol, side, quantity, price, timestamp, fee in all_trades:
             if side == 'BUY':
-                open_positions[symbol].append((quantity, price, tx_id, initial_fees))
+                open_positions[symbol].append((quantity, price, tx_id, fee))
             elif side == 'SELL':
                 quantity_to_close = abs(quantity)
                 while quantity_to_close > 0 and open_positions[symbol]:
-                    open_qty, open_price, open_tx_id, open_fees = open_positions[symbol][0]
+                    open_qty, open_price, open_tx_id, open_fee = open_positions[symbol][0]
                     close_qty = min(quantity_to_close, open_qty)
 
-                    # P&L for this leg: (sell price - buy price) * quantity
+                    # P&L for this closed position: (sell - buy) * quantity - both fees
                     trading_pl = (price - open_price) * close_qty
+                    total_pl = trading_pl - open_fee - fee
 
-                    # Total P&L includes fees from both trades (fees are stored as negative values)
-                    total_pl = trading_pl + open_fees + initial_fees
-
-                    # Assign P&L to the closing trade (includes its fee)
+                    # Only assign P&L to the closing (SELL) trade
                     realized_pl[tx_id] = realized_pl.get(tx_id, 0) + total_pl
-
-                    # Also assign to opening trade (for tracking)
-                    realized_pl[open_tx_id] = realized_pl.get(open_tx_id, 0) + total_pl
 
                     if open_qty == close_qty:
                         open_positions[symbol].popleft()
                     else:
-                        open_positions[symbol][0] = (open_qty - close_qty, open_price, open_tx_id, open_fees)
+                        open_positions[symbol][0] = (open_qty - close_qty, open_price, open_tx_id, open_fee)
 
                     quantity_to_close -= close_qty
 
-        # Update database with calculated P&L
+        # Reset all P&L to 0 first, then update only closed positions
+        c.execute('''UPDATE trades SET realized_pl = 0''')
         for tx_id, pl in realized_pl.items():
             c.execute('''UPDATE trades SET realized_pl = ? WHERE transaction_id = ?''', (pl, tx_id))
 
-        print(f"Calculated P&L for {len(realized_pl)} transactions")
+        print(f"Calculated P&L for {len(realized_pl)} closed positions")
 
         conn.commit()
         conn.close()
