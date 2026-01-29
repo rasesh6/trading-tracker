@@ -135,6 +135,11 @@ def update_data():
         trade_txs = [t for t in transactions if t.get('type') == 'TRADE' and t.get('subType') == 'TRADE']
         print(f"Trade transactions: {len(trade_txs)}")
 
+        # Log sample transaction to check available fields
+        if trade_txs:
+            print(f"Sample transaction keys: {list(trade_txs[0].keys())}")
+            print(f"Sample transaction: {trade_txs[0]}")
+
         for tx in trade_txs:
             tx_id = tx.get('id')
             symbol = tx.get('symbol', '')
@@ -142,46 +147,54 @@ def update_data():
             quantity = int(tx.get('quantity', 0))
             price = abs(float(tx.get('principalAmount', 0)) / max(quantity, 1))
             timestamp = tx.get('timestamp', '')
+            # Get fees/commissions from the transaction
+            fees = abs(float(tx.get('fee', 0)))
+            if not fees:
+                # Try alternative field names
+                fees = abs(float(tx.get('commission', 0) or tx.get('fees', 0) or tx.get('totalFeeAmount', 0)))
 
             opt_type, strike, expiration = parse_option_symbol(symbol)
 
             c.execute('''INSERT OR REPLACE INTO trades
-                (transaction_id, symbol, side, quantity, price, timestamp, type, strike, expiration)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                (tx_id, symbol, side, quantity, price, timestamp, opt_type or 'STOCK', strike, expiration))
+                (transaction_id, symbol, side, quantity, price, timestamp, type, strike, expiration, realized_pl)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (tx_id, symbol, side, quantity, price, timestamp, opt_type or 'STOCK', strike, expiration, -fees))
 
         # Calculate realized P&L using FIFO matching
-        c.execute('''SELECT transaction_id, symbol, side, quantity, price, timestamp FROM trades ORDER BY timestamp''')
+        c.execute('''SELECT transaction_id, symbol, side, quantity, price, timestamp, realized_pl FROM trades ORDER BY timestamp''')
         all_trades = c.fetchall()
 
         # Group by symbol and track open positions
         from collections import defaultdict, deque
 
-        open_positions = defaultdict(deque)  # symbol -> deque of (quantity, price, tx_id)
+        open_positions = defaultdict(deque)  # symbol -> deque of (quantity, price, tx_id, initial_fees)
         realized_pl = {}  # tx_id -> P&L
 
-        for tx_id, symbol, side, quantity, price, timestamp in all_trades:
+        for tx_id, symbol, side, quantity, price, timestamp, initial_fees in all_trades:
             if side == 'BUY':
-                open_positions[symbol].append((quantity, price, tx_id))
+                open_positions[symbol].append((quantity, price, tx_id, initial_fees))
             elif side == 'SELL':
                 quantity_to_close = abs(quantity)
                 while quantity_to_close > 0 and open_positions[symbol]:
-                    open_qty, open_price, open_tx_id = open_positions[symbol][0]
+                    open_qty, open_price, open_tx_id, open_fees = open_positions[symbol][0]
                     close_qty = min(quantity_to_close, open_qty)
 
-                    # P&L for this leg
-                    pl = (price - open_price) * close_qty
+                    # P&L for this leg: (sell price - buy price) * quantity
+                    trading_pl = (price - open_price) * close_qty
 
-                    # Assign P&L to the closing trade
-                    realized_pl[tx_id] = realized_pl.get(tx_id, 0) + pl
+                    # Total P&L includes fees from both trades (fees are stored as negative values)
+                    total_pl = trading_pl + open_fees + initial_fees
+
+                    # Assign P&L to the closing trade (includes its fee)
+                    realized_pl[tx_id] = realized_pl.get(tx_id, 0) + total_pl
 
                     # Also assign to opening trade (for tracking)
-                    realized_pl[open_tx_id] = realized_pl.get(open_tx_id, 0) + pl
+                    realized_pl[open_tx_id] = realized_pl.get(open_tx_id, 0) + total_pl
 
                     if open_qty == close_qty:
                         open_positions[symbol].popleft()
                     else:
-                        open_positions[symbol][0] = (open_qty - close_qty, open_price, open_tx_id)
+                        open_positions[symbol][0] = (open_qty - close_qty, open_price, open_tx_id, open_fees)
 
                     quantity_to_close -= close_qty
 
