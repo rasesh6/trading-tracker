@@ -6,10 +6,15 @@ from flask import Flask, jsonify, send_file, request
 from requests import post, get
 
 app = Flask(__name__)
-DB_PATH = 'trading_tracker.db'
+DB_PATH = '/tmp/trading_tracker.db'
+_db_initialized = False
 
 # Database initialization
 def init_db():
+    global _db_initialized
+    if _db_initialized:
+        return
+
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
@@ -41,6 +46,7 @@ def init_db():
 
     conn.commit()
     conn.close()
+    _db_initialized = True
 
 def get_access_token():
     """Get access token from Public API"""
@@ -232,15 +238,18 @@ def index():
 
 @app.route('/api/stats')
 def stats():
+    init_db()
     return jsonify(get_stats())
 
 @app.route('/api/trades')
 def trades():
+    init_db()
     days = int(request.args.get('days', 7))
     return jsonify(get_trades(days))
 
 @app.route('/api/update')
 def update():
+    init_db()
     return jsonify(update_data())
 
 # Initialize and run
