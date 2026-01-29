@@ -118,10 +118,12 @@ def update_data():
 
         # Fetch YTD data
         now = datetime.now()
-        year_start = datetime(now.year, 1, 1).isoformat() + 'Z'[:0]
-        end_date = now.isoformat() + 'Z'[:0]
+        year_start = datetime(now.year, 1, 1).strftime('%Y-%m-%dT%H:%M:%SZ')
+        end_date = now.strftime('%Y-%m-%dT%H:%M:%SZ')
 
+        print(f"Fetching history from {year_start} to {end_date}")
         history = fetch_order_history(token, account_id, year_start, end_date)
+        print(f"History response keys: {list(history.keys())}")
         portfolio = fetch_portfolio(token, account_id)
 
         conn = sqlite3.connect(DB_PATH)
