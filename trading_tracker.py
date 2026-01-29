@@ -138,7 +138,10 @@ def update_data():
         # Log sample transaction to check available fields
         if trade_txs:
             print(f"Sample transaction keys: {list(trade_txs[0].keys())}")
-            print(f"Sample transaction: {trade_txs[0]}")
+            sample = trade_txs[0]
+            net_amt = float(sample.get('netAmount', 0))
+            princ_amt = float(sample.get('principalAmount', 0))
+            print(f"Sample fee calculation: netAmount={net_amt}, principalAmount={princ_amt}, fee={abs(net_amt - princ_amt)}")
 
         for tx in trade_txs:
             tx_id = tx.get('id')
@@ -148,10 +151,10 @@ def update_data():
             price = abs(float(tx.get('principalAmount', 0)) / max(quantity, 1))
             timestamp = tx.get('timestamp', '')
             # Get fees/commissions from the transaction
-            fees = abs(float(tx.get('fee', 0)))
-            if not fees:
-                # Try alternative field names
-                fees = abs(float(tx.get('commission', 0) or tx.get('fees', 0) or tx.get('totalFeeAmount', 0)))
+            # Actual fee = netAmount - principalAmount (both negative for buys)
+            net_amount = float(tx.get('netAmount', 0))
+            principal_amount = float(tx.get('principalAmount', 0))
+            fees = abs(net_amount - principal_amount)
 
             opt_type, strike, expiration = parse_option_symbol(symbol)
 
