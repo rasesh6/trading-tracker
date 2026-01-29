@@ -150,12 +150,46 @@ def update_data():
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (tx_id, symbol, side, quantity, price, timestamp, opt_type or 'STOCK', strike, expiration))
 
-        # Calculate daily summaries
-        c.execute('''SELECT date(timestamp) as trade_date,
-                    COUNT(*) as orders,
-                    SUM(CASE WHEN realized_pl != 0 THEN 1 ELSE 0 END) as filled,
-                    SUM(realized_pl) as pl
-                    FROM trades GROUP BY date(timestamp)''')
+        # Calculate realized P&L using FIFO matching
+        c.execute('''SELECT transaction_id, symbol, side, quantity, price, timestamp FROM trades ORDER BY timestamp''')
+        all_trades = c.fetchall()
+
+        # Group by symbol and track open positions
+        from collections import defaultdict, deque
+
+        open_positions = defaultdict(deque)  # symbol -> deque of (quantity, price, tx_id)
+        realized_pl = {}  # tx_id -> P&L
+
+        for tx_id, symbol, side, quantity, price, timestamp in all_trades:
+            if side == 'BUY':
+                open_positions[symbol].append((quantity, price, tx_id))
+            elif side == 'SELL':
+                quantity_to_close = abs(quantity)
+                while quantity_to_close > 0 and open_positions[symbol]:
+                    open_qty, open_price, open_tx_id = open_positions[symbol][0]
+                    close_qty = min(quantity_to_close, open_qty)
+
+                    # P&L for this leg
+                    pl = (price - open_price) * close_qty
+
+                    # Assign P&L to the closing trade
+                    realized_pl[tx_id] = realized_pl.get(tx_id, 0) + pl
+
+                    # Also assign to opening trade (for tracking)
+                    realized_pl[open_tx_id] = realized_pl.get(open_tx_id, 0) + pl
+
+                    if open_qty == close_qty:
+                        open_positions[symbol].popleft()
+                    else:
+                        open_positions[symbol][0] = (open_qty - close_qty, open_price, open_tx_id)
+
+                    quantity_to_close -= close_qty
+
+        # Update database with calculated P&L
+        for tx_id, pl in realized_pl.items():
+            c.execute('''UPDATE trades SET realized_pl = ? WHERE transaction_id = ?''', (pl, tx_id))
+
+        print(f"Calculated P&L for {len(realized_pl)} transactions")
 
         conn.commit()
         conn.close()
