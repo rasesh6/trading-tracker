@@ -641,8 +641,17 @@ def get_stats():
     closed_single_legs = [l for l in single_legs if l['status'] == 'closed']
 
     # Total realized P&L (all time)
+    print(f"DEBUG get_stats: Found {len(closed_spreads)} closed spreads, {len(closed_single_legs)} closed single legs")
+    print(f"DEBUG get_stats: Closed spreads P&L:")
+    for s in closed_spreads:
+        print(f"  {s['underlying']} {s.get('spread_type', 'N/A')}: ${s['realized_pl']:+.2f}")
+    print(f"DEBUG get_stats: Closed single legs P&L:")
+    for l in closed_single_legs:
+        print(f"  {l['underlying']} {l['opt_type']} @ ${l['strike']} {l['side']}: ${l['realized_pl']:+.2f}")
+
     total_realized_pl = sum(s['realized_pl'] for s in closed_spreads) + sum(l['realized_pl'] for l in closed_single_legs)
     total_unrealized_pl = sum(s.get('unrealized_pl', 0) for s in open_spreads) + sum(l.get('unrealized_pl', 0) for l in open_single_legs)
+    print(f"DEBUG get_stats: total_realized_pl = ${total_realized_pl:+.2f} (spreads: ${sum(s['realized_pl'] for s in closed_spreads):+.2f} + legs: ${sum(l['realized_pl'] for l in closed_single_legs):+.2f})")
 
     # MTD (Month-to-Date) realized P&L
     now = datetime.now()
