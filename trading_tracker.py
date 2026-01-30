@@ -395,7 +395,7 @@ def update_data():
                 (spread_id, spread_type, underlying, expiry, opened_date, closed_date, status, legs, entry_credit, realized_pl, unrealized_pl)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (spread['spread_id'], spread['type'], spread['underlying'], spread['expiry'],
-                 spread['opened_date'], closed_date, status, json.dumps([l['transaction_id'] for l in spread['legs']),
+                 spread['opened_date'], closed_date, status, json.dumps([l['transaction_id'] for l in spread['legs']]),
                  spread['entry_credit'], realized_pl, 0))  # Unrealized = 0 for now
 
             if status == 'open':
