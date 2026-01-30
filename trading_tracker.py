@@ -369,9 +369,18 @@ def update_data():
 
         # Debug: print first portfolio position structure
         if portfolio_positions:
-            print(f"First portfolio position: {portfolio_positions[0]}")
+            first_symbol = portfolio_positions[0].get('instrument', {}).get('symbol', '')
+            print(f"First portfolio symbol: {first_symbol}")
 
-        portfolio_symbols = set(pos.get('symbol', '') for pos in portfolio_positions if pos.get('symbol'))
+        # Extract symbols and strip -OPTION suffix if present
+        portfolio_symbols = set()
+        for pos in portfolio_positions:
+            symbol = pos.get('instrument', {}).get('symbol', '')
+            if symbol:
+                # Strip -OPTION suffix to match trade symbols
+                clean_symbol = symbol.replace('-OPTION', '')
+                portfolio_symbols.add(clean_symbol)
+
         print(f"Portfolio has {len(portfolio_positions)} positions, symbols: {list(portfolio_symbols)}")
 
         # Determine which spreads are open vs closed

@@ -170,14 +170,27 @@
         function renderSingleLegs(singleLegs) {
             const container = document.getElementById('single-legs');
             const openLegs = singleLegs.filter(l => l.status === 'open');
+            const closedLegs = singleLegs.filter(l => l.status === 'closed');
 
-            container.innerHTML = openLegs.length ? openLegs.map(l => renderSingleLegCard(l)).join('') : '<p style="color:#64748b;">No open single legs</p>';
+            let html = '';
+            if (openLegs.length) {
+                html += '<h3 style="color:#94a3b8;margin:15px 0 10px;">Open Single Legs</h3>';
+                html += openLegs.map(l => renderSingleLegCard(l)).join('');
+            }
+            if (closedLegs.length) {
+                html += '<h3 style="color:#94a3b8;margin:15px 0 10px;">Closed Single Legs</h3>';
+                html += closedLegs.slice(0, 10).map(l => renderSingleLegCard(l)).join(''); // Show first 10
+            }
+
+            container.innerHTML = html || '<p style="color:#64748b;">No single legs</p>';
         }
 
         function renderSingleLegCard(leg) {
             const optType = leg.opt_type === 'C' ? 'CALL' : 'PUT';
             const legType = `${leg.side} ${optType}`;
-            const plClass = (leg.unrealized_pl || 0) >= 0 ? 'positive' : 'negative';
+            const isClosed = leg.status === 'closed';
+            const pl = isClosed ? (leg.realized_pl || 0) : (leg.unrealized_pl || 0);
+            const plClass = pl >= 0 ? 'positive' : 'negative';
 
             const openedDate = new Date(leg.opened_date).toLocaleDateString();
             const entryTotal = leg.entry_price * leg.quantity;
@@ -190,12 +203,12 @@
                             <div class="spread-type">${legType} × ${leg.quantity}</div>
                         </div>
                         <div class="spread-pl ${plClass}">
-                            ${leg.unrealized_pl >= 0 ? '+' : ''}$${(leg.unrealized_pl || 0).toFixed(2)}
+                            ${pl >= 0 ? '+' : ''}$${pl.toFixed(2)}
                         </div>
                     </div>
                     <div class="spread-meta">
                         <span>Opened: ${openedDate}</span>
-                        <span style="color:#f59e0b;">OPEN</span>
+                        <span style="color:${isClosed ? '#10b981' : '#f59e0b'};">${isClosed ? 'CLOSED' : 'OPEN'}</span>
                         <span>Entry: $${entryTotal >= 0 ? '+' : ''}${entryTotal.toFixed(2)}</span>
                         <span>@ $${leg.entry_price.toFixed(2)}</span>
                     </div>
