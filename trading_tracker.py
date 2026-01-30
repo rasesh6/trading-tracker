@@ -196,13 +196,15 @@ def group_trades_into_spreads(trades):
                 spread_type = identify_spread_type(group)
                 spread_id = f"{group[0]['underlying']}_{group[0]['expiry']}_{current['datetime'].strftime('%Y%m%d%H%M')}"
 
-                # Calculate entry credit/debit
+                # Calculate entry credit/debit with detailed logging
                 entry_credit = 0
+                print(f"  SPREAD {spread_id}: {spread_type}")
                 for leg in group:
-                    if leg['side'] == 'SELL':
-                        entry_credit += leg['total_amount']  # Credit received (positive)
-                    else:
-                        entry_credit -= leg['total_amount']  # Debit paid (negative)
+                    leg_contrib = leg['total_amount']  # Use raw amount
+                    entry_credit += leg_contrib
+                    print(f"    {leg['symbol']}: {leg['side']} {leg['quantity']} @ ${leg['price']:.2f} = ${leg_contrib:+.2f}")
+
+                print(f"    → Net entry: ${entry_credit:+.2f}")
 
                 spreads.append({
                     'spread_id': spread_id,
@@ -347,34 +349,59 @@ def update_data():
 
         spreads, single_legs, stock_trades = group_trades_into_spreads(all_trades)
 
-        # Fetch portfolio for current prices (unrealized P&L)
-        print("Fetching portfolio for unrealized P&L...")
+        # Fetch portfolio to detect closed positions
+        print("Fetching portfolio to detect closed positions...")
         portfolio_data = fetch_portfolio(token, account_id)
         portfolio_positions = portfolio_data.get('positions', [])
-        print(f"Portfolio has {len(portfolio_positions)} positions")
+        portfolio_symbols = set(pos.get('symbol', '') for pos in portfolio_positions)
+        print(f"Portfolio has {len(portfolio_positions)} positions: {list(portfolio_symbols)[:10]}")
 
-        # Store spreads with unrealized P&L
+        # Determine which spreads are open vs closed
+        # A spread is open if any of its leg symbols are in the current portfolio
         for spread in spreads:
-            # Calculate unrealized P&L for open spreads
-            unrealized_pl = 0
-            if portfolio_positions:
-                unrealized_pl = calculate_unrealized_pl({
-                    'spread_id': spread['spread_id'],
-                    'legs': json.dumps([l['transaction_id'] for l in spread['legs']]),
-                    'entry_credit': spread['entry_credit']
-                }, portfolio_positions)
+            leg_symbols = set(leg['symbol'] for leg in spread['legs'])
+            is_open = bool(leg_symbols & portfolio_symbols)  # Intersection non-empty = open
+            status = 'open' if is_open else 'closed'
+
+            # For closed spreads, calculate realized P&L by matching opening and closing trades
+            realized_pl = 0
+            closed_date = None
+
+            if status == 'closed':
+                # Find all trades for this spread's underlying+expiry
+                spread_trades = [t for t in all_trades if t.get('underlying') == spread['underlying'] and t.get('expiry') == spread['expiry']]
+
+                # Separate opening and closing trades
+                # Opening: trades that are part of the spread
+                opening_tx_ids = set(l['transaction_id'] for l in spread['legs'])
+                closing_trades = [t for t in spread_trades if t['transaction_id'] not in opening_tx_ids]
+
+                if closing_trades:
+                    # Calculate total entry (opening) and exit (closing)
+                    total_entry = sum(l['total_amount'] for l in spread['legs'])
+                    total_exit = sum(t['total_amount'] for t in closing_trades)
+
+                    # Realized P&L = exit - entry (for spreads, this is the profit/loss)
+                    realized_pl = total_exit - total_entry
+
+                    # Find the latest closing date
+                    closing_trades_sorted = sorted(closing_trades, key=lambda x: x['timestamp'], reverse=True)
+                    if closing_trades_sorted:
+                        closed_date = closing_trades_sorted[0]['timestamp']
+
+                    print(f"    CLOSED: Entry ${total_entry:+.2f} → Exit ${total_exit:+.2f} = P&L ${realized_pl:+.2f}")
 
             c.execute('''INSERT OR REPLACE INTO spreads
-                (spread_id, spread_type, underlying, expiry, opened_date, status, legs, entry_credit, realized_pl, unrealized_pl)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (spread_id, spread_type, underlying, expiry, opened_date, closed_date, status, legs, entry_credit, realized_pl, unrealized_pl)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (spread['spread_id'], spread['type'], spread['underlying'], spread['expiry'],
-                 spread['opened_date'], 'open', json.dumps([l['transaction_id'] for l in spread['legs']]),
-                 spread['entry_credit'], 0, unrealized_pl))
+                 spread['opened_date'], closed_date, status, json.dumps([l['transaction_id'] for l in spread['legs']),
+                 spread['entry_credit'], realized_pl, 0))  # Unrealized = 0 for now
 
-            if spread['entry_credit'] >= 0:
-                print(f"  {spread['underlying']} {spread['type']}: Entry +${spread['entry_credit']:.2f}, Unrealized: ${unrealized_pl:+.2f}")
+            if status == 'open':
+                print(f"  {spread['underlying']} {spread['type']}: OPEN - Entry ${spread['entry_credit']:+.2f}")
             else:
-                print(f"  {spread['underlying']} {spread['type']}: Entry -${abs(spread['entry_credit']):.2f}, Unrealized: ${unrealized_pl:+.2f}")
+                print(f"  {spread['underlying']} {spread['type']}: CLOSED - Entry ${spread['entry_credit']:+.2f}, P&L ${realized_pl:+.2f}")
 
             # Link trades to spread
             for leg_id in spread['leg_ids']:
@@ -386,9 +413,15 @@ def update_data():
             opt_type_name = 'CALL' if leg['opt_type'] == 'C' else 'PUT'
             leg_type = f"{leg['side']} {opt_type_name}"  # e.g., "BUY CALL" or "SELL PUT"
 
+            # Check if this single leg is still open
+            is_open = leg['symbol'] in portfolio_symbols
+            status = 'open' if is_open else 'closed'
+
             # Calculate unrealized P&L for single leg
             unrealized_pl = 0
-            if portfolio_positions:
+            realized_pl = 0
+
+            if status == 'open' and portfolio_positions:
                 for pos in portfolio_positions:
                     if pos.get('symbol') == leg['symbol']:
                         qty = float(pos.get('quantity', 0))
@@ -405,14 +438,17 @@ def update_data():
                         break
 
             c.execute('''INSERT OR REPLACE INTO single_legs
-                (leg_id, underlying, expiry, strike, opt_type, side, quantity, entry_price, opened_date, status, transaction_id, unrealized_pl)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (leg_id, underlying, expiry, strike, opt_type, side, quantity, entry_price, opened_date, status, transaction_id, unrealized_pl, realized_pl)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (leg_id, leg['underlying'], leg['expiry'], leg['strike'], leg['opt_type'],
-                 leg['side'], leg['quantity'], leg['price'], leg['timestamp'], 'open',
-                 leg['transaction_id'], unrealized_pl))
+                 leg['side'], leg['quantity'], leg['price'], leg['timestamp'], status,
+                 leg['transaction_id'], unrealized_pl, realized_pl))
 
-            entry_sign = '+' if leg['total_amount'] >= 0 else '-'
-            print(f"  {leg['underlying']} {leg_type} @ ${leg['strike']}: Entry {entry_sign}${abs(leg['total_amount']):.2f}, Unrealized: ${unrealized_pl:+.2f}")
+            if status == 'open':
+                entry_sign = '+' if leg['total_amount'] >= 0 else '-'
+                print(f"  {leg['underlying']} {leg_type} @ ${leg['strike']}: OPEN - Entry {entry_sign}${abs(leg['total_amount']):.2f}, Unrealized: ${unrealized_pl:+.2f}")
+            else:
+                print(f"  {leg['underlying']} {leg_type} @ ${leg['strike']}: CLOSED")
 
         conn.commit()
         conn.close()
