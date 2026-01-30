@@ -393,6 +393,8 @@ def update_data():
             # For closed spreads, calculate realized P&L by matching opening and closing trades
             realized_pl = 0
             closed_date = None
+            unrealized_pl = 0
+            exit_debit = 0
 
             if status == 'closed':
                 # Find all trades for this spread's underlying+expiry
@@ -407,6 +409,7 @@ def update_data():
                     # Calculate total entry (opening) and exit (closing)
                     total_entry = sum(l['total_amount'] for l in spread['legs'])
                     total_exit = sum(t['total_amount'] for t in closing_trades)
+                    exit_debit = total_exit  # Store exit value for display
 
                     # Realized P&L = exit - entry (for spreads, this is the profit/loss)
                     realized_pl = total_exit - total_entry
@@ -417,16 +420,42 @@ def update_data():
                         closed_date = closing_trades_sorted[0]['timestamp']
 
                     print(f"    CLOSED: Entry ${total_entry:+.2f} → Exit ${total_exit:+.2f} = P&L ${realized_pl:+.2f}")
+            else:
+                # Calculate unrealized P&L for open spreads using portfolio current values
+                # For credit spreads (positive entry): profit = entry - current_value_to_close
+                # For debit spreads (negative entry): profit = current_value - entry
+                total_current_value = 0
+                for leg in spread['legs']:
+                    # Find this leg's current value in portfolio
+                    leg_symbol = leg['symbol']
+                    for pos in portfolio_positions:
+                        pos_symbol = pos.get('instrument', {}).get('symbol', '')
+                        if pos_symbol:
+                            # Strip -OPTION suffix for matching
+                            clean_pos_symbol = pos_symbol.replace('-OPTION', '')
+                            if clean_pos_symbol == leg_symbol:
+                                # currentValue is negative for short positions (credit)
+                                # currentValue is positive for long positions (debit)
+                                current_value = float(pos.get('currentValue', 0))
+                                total_current_value += current_value
+                                break
+
+                # For spreads:
+                # Entry credit (positive) = received premium, want it to go to 0 (profit)
+                # Entry debit (negative) = paid premium, want it to increase (profit)
+                # Unrealized P&L = entry_credit - current_value_to_close
+                # If entry is +81 (credit) and current is -73 (cost to close), P&L = 81 - 73 = +8
+                unrealized_pl = spread['entry_credit'] - abs(total_current_value)
 
             c.execute('''INSERT OR REPLACE INTO spreads
-                (spread_id, spread_type, underlying, expiry, opened_date, closed_date, status, legs, entry_credit, realized_pl, unrealized_pl)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (spread_id, spread_type, underlying, expiry, opened_date, closed_date, status, legs, entry_credit, exit_debit, realized_pl, unrealized_pl)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (spread['spread_id'], spread['type'], spread['underlying'], spread['expiry'],
                  spread['opened_date'], closed_date, status, json.dumps([l['transaction_id'] for l in spread['legs']]),
-                 spread['entry_credit'], realized_pl, 0))  # Unrealized = 0 for now
+                 spread['entry_credit'], exit_debit, realized_pl, unrealized_pl))
 
             if status == 'open':
-                print(f"  {spread['underlying']} {spread['type']}: OPEN - Entry ${spread['entry_credit']:+.2f}")
+                print(f"  {spread['underlying']} {spread['type']}: OPEN - Entry ${spread['entry_credit']:+.2f}, Unrealized: ${unrealized_pl:+.2f}")
             else:
                 print(f"  {spread['underlying']} {spread['type']}: CLOSED - Entry ${spread['entry_credit']:+.2f}, P&L ${realized_pl:+.2f}")
 
@@ -450,19 +479,26 @@ def update_data():
 
             if status == 'open' and portfolio_positions:
                 for pos in portfolio_positions:
-                    if pos.get('symbol') == leg['symbol']:
-                        qty = float(pos.get('quantity', 0))
-                        current_price = float(pos.get('currentPrice', pos.get('averagePrice', leg['price'])))
-                        current_value = qty * current_price
-                        entry_value = leg['total_amount']
+                    pos_symbol = pos.get('instrument', {}).get('symbol', '')
+                    if pos_symbol:
+                        # Strip -OPTION suffix for matching
+                        clean_pos_symbol = pos_symbol.replace('-OPTION', '')
+                        if clean_pos_symbol == leg['symbol']:
+                            # Use currentValue directly from portfolio
+                            # For long (BUY): positive currentValue = current market value
+                            # For short (SELL): negative currentValue = cost to buy back
+                            current_value = float(pos.get('currentValue', 0))
+                            entry_value = leg['total_amount']
 
-                        # For long (BUY): P&L = current - entry
-                        # For short (SELL): P&L = entry - current
-                        if leg['side'] == 'BUY':
-                            unrealized_pl = current_value - entry_value
-                        else:
-                            unrealized_pl = entry_value - current_value
-                        break
+                            # For long (BUY): P&L = current_value - entry_value
+                            # For short (SELL): P&L = entry_value - |current_value|
+                            if leg['side'] == 'BUY':
+                                unrealized_pl = current_value - entry_value
+                            else:
+                                # Short position: current value is negative (cost to close)
+                                # P&L = entry_credit - cost_to_close
+                                unrealized_pl = entry_value - abs(current_value)
+                            break
 
             c.execute('''INSERT OR REPLACE INTO single_legs
                 (leg_id, underlying, expiry, strike, opt_type, side, quantity, entry_price, opened_date, status, transaction_id, unrealized_pl, realized_pl)
