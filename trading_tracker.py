@@ -746,25 +746,83 @@ def get_stats():
     open_single_legs = [l for l in single_legs if l['status'] == 'open']
     closed_single_legs = [l for l in single_legs if l['status'] == 'closed']
 
-    # Total realized P&L (all time)
-    print(f"DEBUG get_stats: Found {len(closed_spreads)} closed spreads, {len(closed_single_legs)} closed single legs")
+    # Calculate realized P&L using Public.com's method: net per option symbol
+    # Spreads are already calculated correctly (per spread)
+    spreads_realized_pl = sum(s['realized_pl'] for s in closed_spreads)
+
+    # For single options (not in spreads): calculate net P&L per option symbol
+    # This matches Public.com's method of netting all trades for each option contract
+    from collections import defaultdict
+
+    # Get symbols that are part of spreads (both opening and closing)
+    c.execute('''SELECT DISTINCT symbol FROM trades WHERE spread_id IS NOT NULL AND opt_type IN ('C', 'P')''')
+    spread_symbols = set(row[0] for row in c.fetchall())
+
+    # Get option trades that are NOT part of spreads
+    # Exclude any trade where the symbol is used in a spread
+    option_trades_not_in_spreads = [
+        t for t in all_trades
+        if t['opt_type'] in ('C', 'P') and t['symbol'] not in spread_symbols
+    ]
+
+    # Group by symbol and calculate net P&L (Public.com's method)
+    symbol_net_pl = defaultdict(float)
+    for t in option_trades_not_in_spreads:
+        symbol_net_pl[t['symbol']] += t['total_amount']
+
+    # Calculate MTD/YTD for single options
+    now = datetime.now()
+    month_start = datetime(now.year, now.month, 1)
+    year_start = datetime(now.year, 1, 1)
+
+    options_mtd_pl = 0
+    options_ytd_pl = 0
+    options_total_pl = sum(symbol_net_pl.values())
+
+    # For MTD/YTD, we need to check when positions were CLOSED
+    # Get trades that closed positions (opposite side trades)
+    for symbol, net_pl in symbol_net_pl.items():
+        # Find the latest closing trade for this symbol
+        symbol_trades = [t for t in option_trades_not_in_spreads if t['symbol'] == symbol]
+        if symbol_trades:
+            # Sort by timestamp and find the last trade
+            symbol_trades.sort(key=lambda x: x['timestamp'])
+            last_trade = symbol_trades[-1]
+
+            if last_trade['timestamp']:
+                try:
+                    trade_dt = datetime.fromisoformat(last_trade['timestamp'].replace('Z', '+00:00'))
+                    trade_dt_naive = trade_dt.replace(tzinfo=None)
+
+                    if trade_dt_naive >= month_start:
+                        options_mtd_pl += net_pl
+                    if trade_dt_naive >= year_start:
+                        options_ytd_pl += net_pl
+                except:
+                    # If timestamp parsing fails, include in both
+                    options_mtd_pl += net_pl
+                    options_ytd_pl += net_pl
+
+    print(f"DEBUG get_stats: Found {len(closed_spreads)} closed spreads, {len(symbol_net_pl)} option symbols")
     print(f"DEBUG get_stats: Closed spreads P&L:")
     for s in closed_spreads:
         print(f"  {s['underlying']} {s.get('spread_type', 'N/A')}: ${s['realized_pl']:+.2f}")
-    print(f"DEBUG get_stats: Closed single legs P&L:")
-    for l in closed_single_legs:
-        print(f"  {l['underlying']} {l['opt_type']} @ ${l['strike']} {l['side']}: ${l['realized_pl']:+.2f}")
+    print(f"DEBUG get_stats: Option symbols net P&L (Public.com method):")
+    for symbol, net_pl in sorted(symbol_net_pl.items()):
+        if abs(net_pl) > 0:
+            print(f"  {symbol}: ${net_pl:+.2f}")
 
-    total_realized_pl = sum(s['realized_pl'] for s in closed_spreads) + sum(l['realized_pl'] for l in closed_single_legs)
+    total_realized_pl = spreads_realized_pl + options_total_pl
     options_unrealized_pl = sum(s.get('unrealized_pl', 0) for s in open_spreads) + sum(l.get('unrealized_pl', 0) for l in open_single_legs)
     total_unrealized_pl = options_unrealized_pl + stock_unrealized_pl
-    print(f"DEBUG get_stats: total_realized_pl = ${total_realized_pl:+.2f} (spreads: ${sum(s['realized_pl'] for s in closed_spreads):+.2f} + legs: ${sum(l['realized_pl'] for l in closed_single_legs):+.2f})")
+    print(f"DEBUG get_stats: total_realized_pl = ${total_realized_pl:+.2f} (spreads: ${spreads_realized_pl:+.2f} + options: ${options_total_pl:+.2f})")
     print(f"DEBUG get_stats: total_unrealized_pl = ${total_unrealized_pl:+.2f} (options: ${options_unrealized_pl:+.2f} + stocks: ${stock_unrealized_pl:+.2f})")
 
     # MTD (Month-to-Date) realized P&L
     now = datetime.now()
     month_start = datetime(now.year, now.month, 1)
 
+    # MTD for spreads
     mtd_spreads = []
     for s in closed_spreads:
         if s.get('closed_date'):
@@ -775,21 +833,13 @@ def get_stats():
             except:
                 pass
 
-    mtd_legs = []
-    for l in closed_single_legs:
-        if l.get('closed_date'):
-            try:
-                closed_dt = datetime.fromisoformat(l['closed_date'].replace('Z', '+00:00'))
-                if closed_dt.replace(tzinfo=None) >= month_start:
-                    mtd_legs.append(l)
-            except:
-                pass
-
-    mtd_realized_pl = sum(s['realized_pl'] for s in mtd_spreads) + sum(l['realized_pl'] for l in mtd_legs)
+    mtd_spreads_pl = sum(s['realized_pl'] for s in mtd_spreads)
+    mtd_realized_pl = mtd_spreads_pl + options_mtd_pl
 
     # YTD (Year-to-Date) realized P&L
     year_start = datetime(now.year, 1, 1)
 
+    # YTD for spreads
     ytd_spreads = []
     for s in closed_spreads:
         if s.get('closed_date'):
@@ -800,19 +850,14 @@ def get_stats():
             except:
                 pass
 
-    ytd_legs = []
-    for l in closed_single_legs:
-        if l.get('closed_date'):
-            try:
-                closed_dt = datetime.fromisoformat(l['closed_date'].replace('Z', '+00:00'))
-                if closed_dt.replace(tzinfo=None) >= year_start:
-                    ytd_legs.append(l)
-            except:
-                pass
-
-    ytd_realized_pl = sum(s['realized_pl'] for s in ytd_spreads) + sum(l['realized_pl'] for l in ytd_legs)
+    ytd_spreads_pl = sum(s['realized_pl'] for s in ytd_spreads)
+    ytd_realized_pl = ytd_spreads_pl + options_ytd_pl
 
     conn.close()
+
+    # Count option symbols closed in MTD/YTD
+    mtd_options_count = sum(1 for _, pl in symbol_net_pl.items() if abs(pl) > 0)
+    ytd_options_count = mtd_options_count  # Same since we're in YTD
 
     return {
         'total_spreads': len(spreads),
@@ -826,8 +871,8 @@ def get_stats():
         'total_unrealized_pl': total_unrealized_pl,
         'mtd_realized_pl': mtd_realized_pl,
         'ytd_realized_pl': ytd_realized_pl,
-        'mtd_closed': len(mtd_spreads) + len(mtd_legs),
-        'ytd_closed': len(ytd_spreads) + len(ytd_legs),
+        'mtd_closed': len(mtd_spreads) + mtd_options_count,
+        'ytd_closed': len(ytd_spreads) + ytd_options_count,
         'spreads': spreads[:50],
         'single_legs': single_legs[:50],
         'stock_positions': open_stock_positions
