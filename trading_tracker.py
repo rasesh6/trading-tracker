@@ -99,6 +99,21 @@ def parse_option_symbol(symbol):
         return underlying, yymmdd, opt_type, strike
     return None, None, None, None
 
+def expiry_to_iso(expiry_yymmdd):
+    """Convert YYMMDD expiry to ISO format datetime (at 23:59:59 ET)"""
+    if not expiry_yymmdd or len(expiry_yymmdd) != 6:
+        return None
+    try:
+        yy = int(expiry_yymmdd[0:2])
+        mm = int(expiry_yymmdd[2:4])
+        dd = int(expiry_yymmdd[4:6])
+        # Convert 2-digit year to 4-digit (2000-2099)
+        yyyy = 2000 + yy
+        # Return as end of day on expiration date
+        return datetime(yyyy, mm, dd, 23, 59, 59).isoformat()
+    except:
+        return None
+
 def identify_spread_type(legs):
     """Identify spread type from legs"""
     calls = [l for l in legs if l['opt_type'] == 'C']
@@ -515,6 +530,7 @@ def update_data():
             # Calculate unrealized P&L for single leg
             unrealized_pl = 0
             realized_pl = 0
+            closed_date = None
 
             if status == 'closed':
                 # Find closing trades for this leg (same symbol, opposite side, not already used)
@@ -542,14 +558,22 @@ def update_data():
                         # Long option expired worthless = lose all premium
                         realized_pl = entry_amount  # already negative
 
-                    print(f"  {leg['underlying']} {leg['opt_type']} @ ${leg['strike']}: EXPIRED/ASSIGNED - P&L ${realized_pl:+.2f}")
+                    # Set closed_date to expiration date
+                    closed_date = expiry_to_iso(leg['expiry'])
+
+                    print(f"  {leg['underlying']} {leg['opt_type']} @ ${leg['strike']}: EXPIRED/ASSIGNED - P&L ${realized_pl:+.2f}, closed_date: {closed_date}")
                 else:
                     # Use FIFO matching (earliest trades first)
                     closing_trades_for_leg.sort(key=lambda x: x['timestamp'])
 
+                    print(f"    DEBUG FIFO: Found {len(closing_trades_for_leg)} closing trades for {leg['symbol']} {leg['side']}")
+                    for ct in closing_trades_for_leg:
+                        print(f"      - {ct['symbol']} {ct['side']} {ct['quantity']} @ ${ct['total_amount']:.2f}")
+
                     # Match quantities
                     remaining_qty = abs(leg['quantity'])
                     leg_exit = 0
+                    last_close_timestamp = None
 
                     for ct in closing_trades_for_leg:
                         if remaining_qty <= 0:
@@ -561,6 +585,9 @@ def update_data():
                         # Pro-rate the exit amount
                         exit_amount = ct['total_amount'] * (match_qty / ct_qty)
                         leg_exit += exit_amount
+                        last_close_timestamp = ct['timestamp']
+
+                        print(f"      Matched {match_qty} of {ct_qty}: exit_amount=${exit_amount:.2f}, total_exit=${leg_exit:.2f}")
 
                         # Mark as used
                         global_used_closing_tx_ids.add(ct['transaction_id'])
@@ -570,6 +597,9 @@ def update_data():
                         entry_amount = leg['total_amount']
                         # P&L = entry + exit
                         realized_pl = entry_amount + leg_exit
+                        # Use the timestamp of the last closing trade
+                        closed_date = last_close_timestamp
+                        print(f"      Final: entry=${entry_amount:.2f} + exit=${leg_exit:.2f} = P&L=${realized_pl:.2f}")
             elif status == 'open' and portfolio_positions:
                 for pos in portfolio_positions:
                     pos_symbol = pos.get('instrument', {}).get('symbol', '')
@@ -594,10 +624,10 @@ def update_data():
                             break
 
             c.execute('''INSERT OR REPLACE INTO single_legs
-                (leg_id, underlying, expiry, strike, opt_type, side, quantity, entry_price, opened_date, status, transaction_id, unrealized_pl, realized_pl)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (leg_id, underlying, expiry, strike, opt_type, side, quantity, entry_price, opened_date, closed_date, status, transaction_id, unrealized_pl, realized_pl)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (leg_id, leg['underlying'], leg['expiry'], leg['strike'], leg['opt_type'],
-                 leg['side'], leg['quantity'], leg['price'], leg['timestamp'], status,
+                 leg['side'], leg['quantity'], leg['price'], leg['timestamp'], closed_date, status,
                  leg['transaction_id'], unrealized_pl, realized_pl))
 
             if status == 'open':
