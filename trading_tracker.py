@@ -397,29 +397,44 @@ def update_data():
             exit_debit = 0
 
             if status == 'closed':
-                # Find all trades for this spread's underlying+expiry
-                spread_trades = [t for t in all_trades if t.get('underlying') == spread['underlying'] and t.get('expiry') == spread['expiry']]
+                # Calculate realized P&L by matching individual opening/closing legs
+                # For each leg in the spread, find its corresponding closing trade
+                realized_pl = 0
+                closed_date = None
+                exit_debit = 0
 
-                # Separate opening and closing trades
-                # Opening: trades that are part of the spread
-                opening_tx_ids = set(l['transaction_id'] for l in spread['legs'])
-                closing_trades = [t for t in spread_trades if t['transaction_id'] not in opening_tx_ids]
+                for leg in spread['legs']:
+                    leg_symbol = leg['symbol']
+                    leg_side = leg['side']
+                    entry_amount = leg['total_amount']
 
-                if closing_trades:
-                    # Calculate total entry (opening) and exit (closing)
-                    total_entry = sum(l['total_amount'] for l in spread['legs'])
-                    total_exit = sum(t['total_amount'] for t in closing_trades)
-                    exit_debit = total_exit  # Store exit value for display
+                    # Find closing trades for this specific leg (same symbol, opposite side)
+                    closing_trades_for_leg = []
+                    for t in all_trades:
+                        if (t.get('symbol') == leg_symbol and
+                            t.get('side') != leg_side and  # Opposite side = closing
+                            t['transaction_id'] not in [l['transaction_id'] for l in spread['legs']]):  # Not part of opening
+                            closing_trades_for_leg.append(t)
 
-                    # Realized P&L = exit - entry (for spreads, this is the profit/loss)
-                    realized_pl = total_exit - total_entry
+                    # Sum all closing trades for this leg
+                    if closing_trades_for_leg:
+                        leg_exit = sum(t['total_amount'] for t in closing_trades_for_leg)
 
-                    # Find the latest closing date
-                    closing_trades_sorted = sorted(closing_trades, key=lambda x: x['timestamp'], reverse=True)
-                    if closing_trades_sorted:
-                        closed_date = closing_trades_sorted[0]['timestamp']
+                        # P&L for this leg:
+                        # If opened SELL (credit, positive), P&L = entry + exit (both positive = profit)
+                        # If opened BUY (debit, negative), P&L = entry + exit (exit positive reduces loss)
+                        leg_pl = entry_amount + leg_exit
+                        realized_pl += leg_pl
 
-                    print(f"    CLOSED: Entry ${total_entry:+.2f} → Exit ${total_exit:+.2f} = P&L ${realized_pl:+.2f}")
+                        exit_debit += leg_exit
+
+                        # Track latest closing date
+                        for ct in closing_trades_for_leg:
+                            if closed_date is None or ct['timestamp'] > closed_date:
+                                closed_date = ct['timestamp']
+
+                if realized_pl != 0 or exit_debit != 0:
+                    print(f"    CLOSED: Entry ${spread['entry_credit']:+.2f} → Exit ${exit_debit:+.2f} = P&L ${realized_pl:+.2f}")
             else:
                 # Calculate unrealized P&L for open spreads using portfolio current values
                 # For credit spreads (positive entry): profit = entry - current_value_to_close
@@ -477,7 +492,22 @@ def update_data():
             unrealized_pl = 0
             realized_pl = 0
 
-            if status == 'open' and portfolio_positions:
+            if status == 'closed':
+                # Find closing trades for this leg (same symbol, opposite side)
+                closing_trades_for_leg = []
+                for t in all_trades:
+                    if (t.get('symbol') == leg['symbol'] and
+                        t.get('side') != leg['side'] and  # Opposite side = closing
+                        t['transaction_id'] != leg['transaction_id']):  # Not this opening trade
+                        closing_trades_for_leg.append(t)
+
+                # Sum all closing trades and calculate P&L
+                if closing_trades_for_leg:
+                    leg_exit = sum(t['total_amount'] for t in closing_trades_for_leg)
+                    entry_amount = leg['total_amount']
+                    # P&L = entry + exit
+                    realized_pl = entry_amount + leg_exit
+            elif status == 'open' and portfolio_positions:
                 for pos in portfolio_positions:
                     pos_symbol = pos.get('instrument', {}).get('symbol', '')
                     if pos_symbol:
