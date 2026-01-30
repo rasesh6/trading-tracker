@@ -64,6 +64,25 @@ def init_db():
         unrealized_pl REAL DEFAULT 0
     )''')
 
+    # Single legs table - individual option positions
+    c.execute('''CREATE TABLE IF NOT EXISTS single_legs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        leg_id TEXT UNIQUE,
+        underlying TEXT,
+        expiry TEXT,
+        strike REAL,
+        opt_type TEXT,
+        side TEXT,
+        quantity INTEGER,
+        entry_price REAL,
+        opened_date TEXT,
+        closed_date TEXT,
+        status TEXT DEFAULT 'open',
+        transaction_id TEXT,
+        realized_pl REAL DEFAULT 0,
+        unrealized_pl REAL DEFAULT 0
+    )''')
+
     conn.commit()
     conn.close()
     _db_initialized = True
@@ -361,6 +380,40 @@ def update_data():
             for leg_id in spread['leg_ids']:
                 c.execute('''UPDATE trades SET spread_id = ? WHERE transaction_id = ?''', (spread['spread_id'], leg_id))
 
+        # Store single legs with unrealized P&L
+        for leg in single_legs:
+            leg_id = f"single_{leg['transaction_id']}"
+            opt_type_name = 'CALL' if leg['opt_type'] == 'C' else 'PUT'
+            leg_type = f"{leg['side']} {opt_type_name}"  # e.g., "BUY CALL" or "SELL PUT"
+
+            # Calculate unrealized P&L for single leg
+            unrealized_pl = 0
+            if portfolio_positions:
+                for pos in portfolio_positions:
+                    if pos.get('symbol') == leg['symbol']:
+                        qty = float(pos.get('quantity', 0))
+                        current_price = float(pos.get('currentPrice', pos.get('averagePrice', leg['price'])))
+                        current_value = qty * current_price
+                        entry_value = leg['total_amount']
+
+                        # For long (BUY): P&L = current - entry
+                        # For short (SELL): P&L = entry - current
+                        if leg['side'] == 'BUY':
+                            unrealized_pl = current_value - entry_value
+                        else:
+                            unrealized_pl = entry_value - current_value
+                        break
+
+            c.execute('''INSERT OR REPLACE INTO single_legs
+                (leg_id, underlying, expiry, strike, opt_type, side, quantity, entry_price, opened_date, status, transaction_id, unrealized_pl)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (leg_id, leg['underlying'], leg['expiry'], leg['strike'], leg['opt_type'],
+                 leg['side'], leg['quantity'], leg['price'], leg['timestamp'], 'open',
+                 leg['transaction_id'], unrealized_pl))
+
+            entry_sign = '+' if leg['total_amount'] >= 0 else '-'
+            print(f"  {leg['underlying']} {leg_type} @ ${leg['strike']}: Entry {entry_sign}${abs(leg['total_amount']):.2f}, Unrealized: ${unrealized_pl:+.2f}")
+
         conn.commit()
         conn.close()
 
@@ -383,12 +436,20 @@ def get_stats():
     columns = ['id', 'spread_id', 'spread_type', 'underlying', 'expiry', 'opened_date', 'closed_date', 'status', 'legs', 'entry_credit', 'exit_debit', 'realized_pl', 'unrealized_pl']
     spreads = [dict(zip(columns, row)) for row in c.fetchall()]
 
+    # Get all single legs
+    c.execute('''SELECT * FROM single_legs ORDER BY opened_date DESC''')
+    leg_columns = ['id', 'leg_id', 'underlying', 'expiry', 'strike', 'opt_type', 'side', 'quantity', 'entry_price', 'opened_date', 'closed_date', 'status', 'transaction_id', 'realized_pl', 'unrealized_pl']
+    single_legs = [dict(zip(leg_columns, row)) for row in c.fetchall()]
+
     # Calculate stats
     closed_spreads = [s for s in spreads if s['status'] == 'closed']
     open_spreads = [s for s in spreads if s['status'] == 'open']
 
-    total_realized_pl = sum(s['realized_pl'] for s in closed_spreads)
-    total_unrealized_pl = sum(s.get('unrealized_pl', 0) for s in open_spreads)
+    open_single_legs = [l for l in single_legs if l['status'] == 'open']
+    closed_single_legs = [l for l in single_legs if l['status'] == 'closed']
+
+    total_realized_pl = sum(s['realized_pl'] for s in closed_spreads) + sum(l['realized_pl'] for l in closed_single_legs)
+    total_unrealized_pl = sum(s.get('unrealized_pl', 0) for s in open_spreads) + sum(l.get('unrealized_pl', 0) for l in open_single_legs)
 
     conn.close()
 
@@ -396,9 +457,13 @@ def get_stats():
         'total_spreads': len(spreads),
         'open_spreads': len(open_spreads),
         'closed_spreads': len(closed_spreads),
+        'total_single_legs': len(single_legs),
+        'open_single_legs': len(open_single_legs),
+        'closed_single_legs': len(closed_single_legs),
         'total_realized_pl': total_realized_pl,
         'total_unrealized_pl': total_unrealized_pl,
-        'spreads': spreads[:50]  # Return more for dashboard
+        'spreads': spreads[:50],
+        'single_legs': single_legs[:50]
     }
 
 def get_trades(days=7):
@@ -451,6 +516,7 @@ def reset():
     c = conn.cursor()
     c.execute('DELETE FROM trades')
     c.execute('DELETE FROM spreads')
+    c.execute('DELETE FROM single_legs')
     conn.commit()
     conn.close()
     return jsonify({'status': 'reset'})

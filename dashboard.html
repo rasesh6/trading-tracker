@@ -96,12 +96,17 @@
         </div>
 
         <div class="section">
-            <h2>Open Positions <span class="count" id="open-count-label">0</span></h2>
+            <h2>Open Spreads <span class="count" id="open-spreads-count">0</span></h2>
             <div id="open-spreads"></div>
         </div>
 
         <div class="section">
-            <h2>Closed Positions <span class="count" id="closed-count-label">0</span></h2>
+            <h2>Single Legs <span class="count" id="single-legs-count">0</span></h2>
+            <div id="single-legs"></div>
+        </div>
+
+        <div class="section">
+            <h2>Closed Spreads <span class="count" id="closed-count-label">0</span></h2>
             <div id="closed-spreads"></div>
         </div>
 
@@ -131,8 +136,10 @@
             document.getElementById('total-closed').textContent = `${data.closed_spreads} closed spreads`;
             document.getElementById('total-spreads').textContent = data.total_spreads;
             document.getElementById('closed-spreads').textContent = `${data.closed_spreads} closed`;
+            document.getElementById('open-spreads-count').textContent = data.open_spreads;
+            document.getElementById('single-legs-count').textContent = data.open_single_legs || 0;
 
-            const avgPl = data.closed_spreads > 0 ? data.total_realized_pl / data.closed_spreads : 0;
+            const avgPl = (data.closed_spreads + (data.closed_single_legs || 0)) > 0 ? data.total_realized_pl / (data.closed_spreads + data.closed_single_legs) : 0;
             setPl('avg-pl', avgPl);
 
             document.getElementById('open-count-label').textContent = `${data.open_spreads} open spreads`;
@@ -141,6 +148,9 @@
 
             // Render spreads
             renderSpreads(data.spreads);
+
+            // Render single legs
+            renderSingleLegs(data.single_legs || []);
 
             // Load chart data
             loadChartData();
@@ -153,8 +163,44 @@
             const openSpreads = spreads.filter(s => s.status === 'open');
             const closedSpreads = spreads.filter(s => s.status === 'closed');
 
-            openContainer.innerHTML = openSpreads.length ? openSpreads.map(s => renderSpreadCard(s)).join('') : '<p style="color:#64748b;">No open positions</p>';
-            closedContainer.innerHTML = closedSpreads.length ? closedSpreads.map(s => renderSpreadCard(s)).join('') : '<p style="color:#64748b;">No closed positions</p>';
+            openContainer.innerHTML = openSpreads.length ? openSpreads.map(s => renderSpreadCard(s)).join('') : '<p style="color:#64748b;">No open spreads</p>';
+            closedContainer.innerHTML = closedSpreads.length ? closedSpreads.map(s => renderSpreadCard(s)).join('') : '<p style="color:#64748b;">No closed spreads</p>';
+        }
+
+        function renderSingleLegs(singleLegs) {
+            const container = document.getElementById('single-legs');
+            const openLegs = singleLegs.filter(l => l.status === 'open');
+
+            container.innerHTML = openLegs.length ? openLegs.map(l => renderSingleLegCard(l)).join('') : '<p style="color:#64748b;">No open single legs</p>';
+        }
+
+        function renderSingleLegCard(leg) {
+            const optType = leg.opt_type === 'C' ? 'CALL' : 'PUT';
+            const legType = `${leg.side} ${optType}`;
+            const plClass = (leg.unrealized_pl || 0) >= 0 ? 'positive' : 'negative';
+
+            const openedDate = new Date(leg.opened_date).toLocaleDateString();
+            const entryTotal = leg.entry_price * leg.quantity;
+
+            return `
+                <div class="spread-card">
+                    <div class="spread-header">
+                        <div>
+                            <div class="spread-title">${leg.underlying} - ${leg.expiry} @ $${leg.strike}</div>
+                            <div class="spread-type">${legType} × ${leg.quantity}</div>
+                        </div>
+                        <div class="spread-pl ${plClass}">
+                            ${leg.unrealized_pl >= 0 ? '+' : ''}$${(leg.unrealized_pl || 0).toFixed(2)}
+                        </div>
+                    </div>
+                    <div class="spread-meta">
+                        <span>Opened: ${openedDate}</span>
+                        <span style="color:#f59e0b;">OPEN</span>
+                        <span>Entry: $${entryTotal >= 0 ? '+' : ''}${entryTotal.toFixed(2)}</span>
+                        <span>@ $${leg.entry_price.toFixed(2)}</span>
+                    </div>
+                </div>
+            `;
         }
 
         function renderSpreadCard(spread) {
