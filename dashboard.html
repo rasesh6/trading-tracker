@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Trading Tracker Dashboard</title>
+    <title>Trading Tracker Dashboard - Spreads</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; }
-        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+        .container { max-width: 1600px; margin: 0 auto; padding: 20px; }
 
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
         .header h1 { font-size: 28px; font-weight: 600; }
@@ -26,24 +26,41 @@
         .stat-card .value.negative { color: #ef4444; }
         .stat-card .sub { font-size: 13px; color: #64748b; margin-top: 4px; }
 
+        .section { background: #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 30px; }
+        .section h2 { font-size: 18px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; }
+        .section h2 .count { font-size: 14px; color: #64748b; font-weight: normal; }
+
+        .spread-card {
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 12px;
+        }
+        .spread-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .spread-title { font-size: 16px; font-weight: 600; }
+        .spread-type { font-size: 12px; color: #94a3b8; margin-top: 4px; }
+        .spread-pl { font-size: 24px; font-weight: 700; }
+        .spread-pl.positive { color: #22c55e; }
+        .spread-pl.negative { color: #ef4444; }
+        .spread-meta { display: flex; gap: 20px; font-size: 13px; color: #64748b; }
+        .spread-legs { margin-top: 12px; padding-top: 12px; border-top: 1px solid #334155; }
+        .spread-leg { display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; }
+        .leg-symbol { font-family: monospace; }
+        .leg-side { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .leg-side.BUY { background: #22c55e20; color: #22c55e; }
+        .leg-side.SELL { background: #ef444420; color: #ef4444; }
+
         .chart-section { background: #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 30px; }
         .chart-section h2 { font-size: 18px; margin-bottom: 15px; }
 
-        .trades-section { background: #1e293b; border-radius: 12px; padding: 20px; }
-        .trades-section h2 { font-size: 18px; margin-bottom: 15px; }
-        .trades-table { width: 100%; border-collapse: collapse; }
-        .trades-table th { text-align: left; padding: 12px; border-bottom: 1px solid #334155; color: #94a3b8; font-size: 12px; }
-        .trades-table td { padding: 12px; border-bottom: 1px solid #334155; font-size: 14px; }
-        .trades-table tr:hover { background: #334155; }
-        .positive { color: #22c55e; }
-        .negative { color: #ef4444; }
         .last-updated { text-align: center; color: #64748b; margin-top: 20px; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>Trading Tracker</h1>
+            <h1>Options Spread Tracker</h1>
             <div class="header-buttons">
                 <button class="reset-btn" onclick="resetData()">Reset DB</button>
                 <button class="update-btn" onclick="updateData()">Update Data</button>
@@ -52,57 +69,40 @@
 
         <div class="stats-grid">
             <div class="stat-card">
-                <h3>Today P&L</h3>
-                <div class="value" id="today-pl">$0.00</div>
-                <div class="sub" id="today-orders">0 orders</div>
+                <h3>Total Realized P&L</h3>
+                <div class="value" id="total-pl">$0.00</div>
+                <div class="sub" id="total-closed">0 closed spreads</div>
             </div>
             <div class="stat-card">
-                <h3>Today Win Rate</h3>
-                <div class="value" id="today-winrate">0%</div>
+                <h3>Open Positions</h3>
+                <div class="value" id="open-count">0</div>
+                <div class="sub" id="open-unrealized">Unrealized: $0.00</div>
             </div>
             <div class="stat-card">
-                <h3>Month P&L</h3>
-                <div class="value" id="month-pl">$0.00</div>
-                <div class="sub" id="month-orders">0 orders</div>
+                <h3>Total Spreads</h3>
+                <div class="value" id="total-spreads">0</div>
+                <div class="sub" id="closed-spreads">0 closed</div>
             </div>
             <div class="stat-card">
-                <h3>Month Win Rate</h3>
-                <div class="value" id="month-winrate">0%</div>
-            </div>
-            <div class="stat-card">
-                <h3>YTD P&L</h3>
-                <div class="value" id="ytd-pl">$0.00</div>
-                <div class="sub" id="ytd-orders">0 orders</div>
-            </div>
-            <div class="stat-card">
-                <h3>YTD Win Rate</h3>
-                <div class="value" id="ytd-winrate">0%</div>
+                <h3>Average P&L</h3>
+                <div class="value" id="avg-pl">$0.00</div>
+                <div class="sub">Per closed spread</div>
             </div>
         </div>
 
         <div class="chart-section">
-            <h2>Cumulative P&L (Year to Date)</h2>
+            <h2>Cumulative P&L (All Spreads)</h2>
             <canvas id="pnlChart" height="100"></canvas>
         </div>
 
-        <div class="trades-section">
-            <h2>Recent Trades (Last 7 Days)</h2>
-            <table class="trades-table">
-                <thead>
-                    <tr>
-                        <th>Date</th>
-                        <th>Symbol</th>
-                        <th>Side</th>
-                        <th>Quantity</th>
-                        <th>Price</th>
-                        <th>Type</th>
-                        <th>Strike</th>
-                        <th>P&L</th>
-                    </tr>
-                </thead>
-                <tbody id="trades-body">
-                </tbody>
-            </table>
+        <div class="section">
+            <h2>Open Positions <span class="count" id="open-count-label">0</span></h2>
+            <div id="open-spreads"></div>
+        </div>
+
+        <div class="section">
+            <h2>Closed Positions <span class="count" id="closed-count-label">0</span></h2>
+            <div id="closed-spreads"></div>
         </div>
 
         <p class="last-updated">Last updated: <span id="last-updated">Never</span></p>
@@ -126,33 +126,93 @@
                 el.className = 'value ' + (val >= 0 ? 'positive' : 'negative');
             };
 
-            setPl('today-pl', data.today.pl);
-            setPl('month-pl', data.month.pl);
-            setPl('ytd-pl', data.ytd.pl);
+            setPl('total-pl', data.total_realized_pl);
+            document.getElementById('total-closed').textContent = `${data.closed_spreads} closed spreads`;
+            document.getElementById('open-count').textContent = data.open_spreads;
+            document.getElementById('total-spreads').textContent = data.total_spreads;
+            document.getElementById('closed-spreads').textContent = `${data.closed_spreads} closed`;
 
-            document.getElementById('today-orders').textContent = `${data.today.orders} orders`;
-            document.getElementById('today-winrate').textContent = `${data.today.win_rate}%`;
-            document.getElementById('month-orders').textContent = `${data.month.orders} orders`;
-            document.getElementById('month-winrate').textContent = `${data.month.win_rate}%`;
-            document.getElementById('ytd-orders').textContent = `${data.ytd.orders} orders`;
-            document.getElementById('ytd-winrate').textContent = `${data.ytd.win_rate}%`;
-            document.getElementById('last-updated').textContent = new Date(data.last_updated).toLocaleString();
+            const avgPl = data.closed_spreads > 0 ? data.total_realized_pl / data.closed_spreads : 0;
+            setPl('avg-pl', avgPl);
 
-            // Update chart
-            updateChart(data.ytd.daily_breakdown);
+            document.getElementById('open-count-label').textContent = `(${data.open_spreads})`;
+            document.getElementById('closed-count-label').textContent = `(${data.closed_spreads})`;
+            document.getElementById('last-updated').textContent = new Date().toLocaleString();
 
-            // Load trades
-            loadTrades();
+            // Render spreads
+            renderSpreads(data.spreads);
+
+            // Load chart data
+            loadChartData();
         }
 
-        function updateChart(dailyData) {
-            const ctx = document.getElementById('pnlChart').getContext('2d');
-            const labels = dailyData.map(d => d.date);
-            const data = dailyData.map(d => d.pl);
+        function renderSpreads(spreads) {
+            const openContainer = document.getElementById('open-spreads');
+            const closedContainer = document.getElementById('closed-spreads');
+
+            const openSpreads = spreads.filter(s => s.status === 'open');
+            const closedSpreads = spreads.filter(s => s.status === 'closed');
+
+            openContainer.innerHTML = openSpreads.length ? openSpreads.map(s => renderSpreadCard(s)).join('') : '<p style="color:#64748b;">No open positions</p>';
+            closedContainer.innerHTML = closedSpreads.length ? closedSpreads.map(s => renderSpreadCard(s)).join('') : '<p style="color:#64748b;">No closed positions</p>';
+        }
+
+        function renderSpreadCard(spread) {
+            const legs = JSON.parse(spread.legs || '[]');
+            const isClosed = spread.status === 'closed';
+            const displayPl = isClosed ? spread.realized_pl : (spread.unrealized_pl || 0);
+            const plClass = displayPl >= 0 ? 'positive' : 'negative';
+
+            const openedDate = new Date(spread.opened_date).toLocaleDateString();
+            const closedDate = isClosed && spread.closed_date ? new Date(spread.closed_date).toLocaleDateString() : null;
+
+            return `
+                <div class="spread-card">
+                    <div class="spread-header">
+                        <div>
+                            <div class="spread-title">${spread.underlying} - ${spread.expiry}</div>
+                            <div class="spread-type">${spread.spread_type}</div>
+                        </div>
+                        <div class="spread-pl ${plClass}">
+                            ${displayPl >= 0 ? '+' : ''}$${(displayPl || 0).toFixed(2)}
+                        </div>
+                    </div>
+                    <div class="spread-meta">
+                        <span>Opened: ${openedDate}</span>
+                        ${closedDate ? `<span>Closed: ${closedDate}</span>` : '<span style="color:#f59e0b;">OPEN</span>'}
+                        <span>Entry: ${spread.entry_credit >= 0 ? '+' : ''}$${spread.entry_credit.toFixed(2)}</span>
+                        ${isClosed ? `<span>Exit: $${(spread.exit_debit || 0).toFixed(2)}</span>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        async function loadChartData() {
+            const response = await fetch('/api/trades?days=365');
+            const spreads = await response.json();
+
+            // Group by date for cumulative P&L
+            const dailyPl = {};
+            for (const spread of spreads) {
+                if (spread.status === 'closed' && spread.realized_pl !== 0) {
+                    const date = new Date(spread.closed_date || spread.opened_date).toLocaleDateString();
+                    dailyPl[date] = (dailyPl[date] || 0) + spread.realized_pl;
+                }
+            }
+
+            // Sort dates
+            const sortedDates = Object.keys(dailyPl).sort((a, b) => new Date(a) - new Date(b));
+            const data = sortedDates.map(d => dailyPl[d]);
 
             // Calculate cumulative
             let cumulative = 0;
             const cumulativeData = data.map(v => { cumulative += v; return cumulative; });
+
+            updateChart(sortedDates, cumulativeData);
+        }
+
+        function updateChart(labels, data) {
+            const ctx = document.getElementById('pnlChart').getContext('2d');
 
             if (pnlChart) pnlChart.destroy();
 
@@ -162,9 +222,9 @@
                     labels: labels,
                     datasets: [{
                         label: 'Cumulative P&L',
-                        data: cumulativeData,
-                        borderColor: cumulativeData[cumulativeData.length-1] >= 0 ? '#22c55e' : '#ef4444',
-                        backgroundColor: cumulativeData[cumulativeData.length-1] >= 0 ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
+                        data: data,
+                        borderColor: data[data.length-1] >= 0 ? '#22c55e' : '#ef4444',
+                        backgroundColor: data[data.length-1] >= 0 ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
                         fill: true,
                         tension: 0.4
                     }]
@@ -173,32 +233,11 @@
                     responsive: true,
                     plugins: { legend: { display: false } },
                     scales: {
-                        x: { grid: { color: '#334155' }, ticks: { color: '#94a3b8' } },
+                        x: { grid: { color: '#334155' }, ticks: { color: '#94a3b8', maxTicksLimit: 10 } },
                         y: { grid: { color: '#334155' }, ticks: { color: '#94a3b8' } }
                     }
                 }
             });
-        }
-
-        async function loadTrades() {
-            const response = await fetch('/api/trades?days=7');
-            const trades = await response.json();
-
-            const tbody = document.getElementById('trades-body');
-            tbody.innerHTML = trades.map(t => `
-                <tr>
-                    <td>${new Date(t.timestamp).toLocaleDateString()}</td>
-                    <td>${t.symbol}</td>
-                    <td>${t.side}</td>
-                    <td>${t.quantity}</td>
-                    <td>$${t.price.toFixed(2)}</td>
-                    <td>${t.type}</td>
-                    <td>${t.strike || 'N/A'}</td>
-                    <td class="${t.realized_pl >= 0 ? 'positive' : 'negative'}">
-                        ${t.realized_pl >= 0 ? '+' : ''}$${(t.realized_pl || 0).toFixed(2)}
-                    </td>
-                </tr>
-            `).join('');
         }
 
         async function updateData() {
