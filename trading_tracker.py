@@ -398,7 +398,8 @@ def update_data():
 
             if status == 'closed':
                 # Calculate realized P&L by matching individual opening/closing legs
-                # For each leg in the spread, find its corresponding closing trade
+                # Track which closing trades we've used to avoid double-matching
+                used_closing_tx_ids = set()
                 realized_pl = 0
                 closed_date = None
                 exit_debit = 0
@@ -406,26 +407,46 @@ def update_data():
                 for leg in spread['legs']:
                     leg_symbol = leg['symbol']
                     leg_side = leg['side']
+                    leg_qty = leg['quantity']
                     entry_amount = leg['total_amount']
 
-                    # Find closing trades for this specific leg (same symbol, opposite side)
+                    # Find closing trades for this specific leg (same symbol, opposite side, not already used)
                     closing_trades_for_leg = []
                     for t in all_trades:
                         if (t.get('symbol') == leg_symbol and
                             t.get('side') != leg_side and  # Opposite side = closing
-                            t['transaction_id'] not in [l['transaction_id'] for l in spread['legs']]):  # Not part of opening
+                            t['transaction_id'] not in [l['transaction_id'] for l in spread['legs']] and  # Not part of opening
+                            t['transaction_id'] not in used_closing_tx_ids):  # Not already matched to another leg
                             closing_trades_for_leg.append(t)
 
-                    # Sum all closing trades for this leg
-                    if closing_trades_for_leg:
-                        leg_exit = sum(t['total_amount'] for t in closing_trades_for_leg)
+                    # Use the earliest closing trades first (FIFO matching)
+                    closing_trades_for_leg.sort(key=lambda x: x['timestamp'])
 
+                    # Match as much quantity as possible
+                    remaining_qty = abs(leg_qty)
+                    leg_exit = 0
+
+                    for ct in closing_trades_for_leg:
+                        if remaining_qty <= 0:
+                            break
+
+                        ct_qty = abs(ct['quantity'])
+                        match_qty = min(remaining_qty, ct_qty)
+
+                        # Pro-rate the exit amount based on matched quantity
+                        exit_amount = ct['total_amount'] * (match_qty / ct_qty)
+                        leg_exit += exit_amount
+
+                        # Mark as used (fully or partially)
+                        used_closing_tx_ids.add(ct['transaction_id'])
+                        remaining_qty -= match_qty
+
+                    if leg_exit != 0:
                         # P&L for this leg:
                         # If opened SELL (credit, positive), P&L = entry + exit (both positive = profit)
                         # If opened BUY (debit, negative), P&L = entry + exit (exit positive reduces loss)
                         leg_pl = entry_amount + leg_exit
                         realized_pl += leg_pl
-
                         exit_debit += leg_exit
 
                         # Track latest closing date
@@ -479,6 +500,9 @@ def update_data():
                 c.execute('''UPDATE trades SET spread_id = ? WHERE transaction_id = ?''', (spread['spread_id'], leg_id))
 
         # Store single legs with unrealized P&L
+        # Track which closing trades we've used globally to avoid double-matching
+        global_used_closing_tx_ids = set()
+
         for leg in single_legs:
             leg_id = f"single_{leg['transaction_id']}"
             opt_type_name = 'CALL' if leg['opt_type'] == 'C' else 'PUT'
@@ -493,17 +517,38 @@ def update_data():
             realized_pl = 0
 
             if status == 'closed':
-                # Find closing trades for this leg (same symbol, opposite side)
+                # Find closing trades for this leg (same symbol, opposite side, not already used)
                 closing_trades_for_leg = []
                 for t in all_trades:
                     if (t.get('symbol') == leg['symbol'] and
                         t.get('side') != leg['side'] and  # Opposite side = closing
-                        t['transaction_id'] != leg['transaction_id']):  # Not this opening trade
+                        t['transaction_id'] != leg['transaction_id'] and  # Not this opening trade
+                        t['transaction_id'] not in global_used_closing_tx_ids):  # Not already used
                         closing_trades_for_leg.append(t)
 
-                # Sum all closing trades and calculate P&L
-                if closing_trades_for_leg:
-                    leg_exit = sum(t['total_amount'] for t in closing_trades_for_leg)
+                # Use FIFO matching (earliest trades first)
+                closing_trades_for_leg.sort(key=lambda x: x['timestamp'])
+
+                # Match quantities
+                remaining_qty = abs(leg['quantity'])
+                leg_exit = 0
+
+                for ct in closing_trades_for_leg:
+                    if remaining_qty <= 0:
+                        break
+
+                    ct_qty = abs(ct['quantity'])
+                    match_qty = min(remaining_qty, ct_qty)
+
+                    # Pro-rate the exit amount
+                    exit_amount = ct['total_amount'] * (match_qty / ct_qty)
+                    leg_exit += exit_amount
+
+                    # Mark as used
+                    global_used_closing_tx_ids.add(ct['transaction_id'])
+                    remaining_qty -= match_qty
+
+                if leg_exit != 0:
                     entry_amount = leg['total_amount']
                     # P&L = entry + exit
                     realized_pl = entry_amount + leg_exit
