@@ -387,6 +387,21 @@ def update():
     init_db()
     return jsonify(update_data())
 
+@app.route('/api/reset')
+def reset():
+    """Reset database and recalculate from scratch"""
+    import os
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('DELETE FROM trades')
+    c.execute('DELETE FROM daily_summary')
+    conn.commit()
+    conn.close()
+
+    # Fetch fresh data and recalculate
+    result = update_data()
+    return jsonify({'status': 'Database reset', 'update_result': result})
+
 # Initialize and run
 if __name__ == '__main__':
     init_db()

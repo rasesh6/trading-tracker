@@ -12,8 +12,11 @@
 
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
         .header h1 { font-size: 28px; font-weight: 600; }
-        .update-btn { background: #3b82f6; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; }
+        .header-buttons { display: flex; gap: 10px; }
+        .update-btn, .reset-btn { background: #3b82f6; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; }
+        .reset-btn { background: #ef4444; }
         .update-btn:hover { background: #2563eb; }
+        .reset-btn:hover { background: #dc2626; }
 
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 30px; }
         .stat-card { background: #1e293b; border-radius: 12px; padding: 20px; }
@@ -41,7 +44,10 @@
     <div class="container">
         <div class="header">
             <h1>Trading Tracker</h1>
-            <button class="update-btn" onclick="updateData()">Update Data</button>
+            <div class="header-buttons">
+                <button class="reset-btn" onclick="resetData()">Reset DB</button>
+                <button class="update-btn" onclick="updateData()">Update Data</button>
+            </div>
         </div>
 
         <div class="stats-grid">
@@ -201,6 +207,15 @@
             await fetch('/api/update');
             await loadData();
             btn.textContent = 'Update Data';
+        }
+
+        async function resetData() {
+            if (!confirm('This will delete all data and recalculate from Public API. Continue?')) return;
+            const btn = document.querySelector('.reset-btn');
+            btn.textContent = 'Resetting...';
+            await fetch('/api/reset');
+            await loadData();
+            btn.textContent = 'Reset DB';
         }
 
         // Auto-refresh every 5 minutes
