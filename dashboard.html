@@ -192,7 +192,21 @@
             const plClass = pl >= 0 ? 'positive' : 'negative';
 
             const openedDate = new Date(leg.opened_date).toLocaleDateString();
-            const entryTotal = leg.entry_price * leg.quantity;
+
+            // Calculate entry total: entry_price is per-contract, quantity is number of contracts
+            const entryTotal = parseFloat(leg.entry_price || 0) * parseFloat(leg.quantity || 1);
+
+            // Determine display sign based on position type
+            // SELL PUT/CALL (short): received premium = positive
+            // BUY PUT/CALL (long): paid premium = negative
+            let entryDisplay;
+            if (leg.side === 'SELL') {
+                // Short position: received premium
+                entryDisplay = `+$${Math.abs(entryTotal).toFixed(2)}`;
+            } else {
+                // Long position: paid premium
+                entryDisplay = `-$${Math.abs(entryTotal).toFixed(2)}`;
+            }
 
             return `
                 <div class="spread-card">
@@ -208,8 +222,8 @@
                     <div class="spread-meta">
                         <span>Opened: ${openedDate}</span>
                         <span style="color:${isClosed ? '#10b981' : '#f59e0b'};">${isClosed ? 'CLOSED' : 'OPEN'}</span>
-                        <span>Entry: $${entryTotal >= 0 ? '+' : ''}${entryTotal.toFixed(2)}</span>
-                        <span>@ $${leg.entry_price.toFixed(2)}</span>
+                        <span>Entry: ${entryDisplay}</span>
+                        <span>@ $${Math.abs(leg.entry_price).toFixed(2)}</span>
                     </div>
                 </div>
             `;
