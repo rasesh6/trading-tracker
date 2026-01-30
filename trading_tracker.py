@@ -26,6 +26,7 @@ def init_db():
         side TEXT,
         quantity INTEGER,
         price REAL,
+        total_amount REAL,
         timestamp TEXT,
         type TEXT,
         strike TEXT,
@@ -33,6 +34,12 @@ def init_db():
         realized_pl REAL DEFAULT 0,
         fee_amount REAL DEFAULT 0
     )''')
+
+    # Add total_amount column if it doesn't exist (for existing databases)
+    try:
+        c.execute('''ALTER TABLE trades ADD COLUMN total_amount REAL DEFAULT 0''')
+    except:
+        pass  # Column already exists
 
     # Add fee_amount column if it doesn't exist (for existing databases)
     try:
@@ -155,36 +162,49 @@ def update_data():
             symbol = tx.get('symbol', '')
             side = tx.get('side', '')
             quantity = int(tx.get('quantity', 0))
-            price = abs(float(tx.get('principalAmount', 0)) / max(quantity, 1))
+            principal_amount = float(tx.get('principalAmount', 0))
+            # For options, principalAmount is per contract (price × 100 × quantity typically)
+            # For stocks, principalAmount is total (price × quantity)
+            # We store both:
+            # - price: per-share or per-contract price (for display)
+            # - total_amount: total dollar amount (for P&L calculation)
+            security_type = tx.get('securityType', 'EQUITY')
+            if security_type == 'EQUITY':
+                # Stock: principalAmount is total, price is per share
+                price = abs(principal_amount / quantity)
+                total_amount = principal_amount
+            else:
+                # Option: principalAmount is total, calculate per-contract price
+                price = abs(principal_amount / quantity)
+                total_amount = principal_amount
+
             timestamp = tx.get('timestamp', '')
             # Get fees/commissions from the transaction
             # Actual fee = netAmount - principalAmount (both negative for buys)
             net_amount = float(tx.get('netAmount', 0))
-            principal_amount = float(tx.get('principalAmount', 0))
             fees = abs(net_amount - principal_amount)
 
             opt_type, strike, expiration = parse_option_symbol(symbol)
 
             c.execute('''INSERT OR REPLACE INTO trades
-                (transaction_id, symbol, side, quantity, price, timestamp, type, strike, expiration, fee_amount)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                (tx_id, symbol, side, quantity, price, timestamp, opt_type or 'STOCK', strike, expiration, fees))
+                (transaction_id, symbol, side, quantity, price, total_amount, timestamp, type, strike, expiration, fee_amount)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (tx_id, symbol, side, quantity, price, total_amount, timestamp, opt_type or security_type, strike, expiration, fees))
 
         # Calculate realized P&L using FIFO matching
-        c.execute('''SELECT transaction_id, symbol, side, quantity, price, timestamp, fee_amount FROM trades ORDER BY datetime(timestamp) ASC''')
+        c.execute('''SELECT transaction_id, symbol, side, quantity, price, total_amount, timestamp, fee_amount, type FROM trades ORDER BY datetime(timestamp) ASC''')
         all_trades = c.fetchall()
 
         print(f"Processing {len(all_trades)} trades in chronological order")
 
-        # Track positions: symbol -> list of (quantity, price, tx_id, fee, is_long)
-        # is_long = True for long positions (BUY to open), False for short positions (SELL to open)
+        # Track positions: symbol -> list of (quantity, total_amount, tx_id, fee)
         from collections import defaultdict, deque
 
         long_positions = defaultdict(deque)  # Opening BUYs
         short_positions = defaultdict(deque)  # Opening SELLs (short positions)
         realized_pl = {}  # tx_id -> P&L (only for closing trades)
 
-        for tx_id, symbol, side, quantity, price, timestamp, fee in all_trades:
+        for tx_id, symbol, side, quantity, price, total_amount, timestamp, fee, security_type in all_trades:
             if side == 'BUY':
                 # BUY can either:
                 # 1. Open a long position (if no short positions to close)
@@ -193,32 +213,33 @@ def update_data():
 
                 # First, try to close any existing short positions
                 while quantity_to_process > 0 and short_positions[symbol]:
-                    open_qty, open_price, open_tx_id, open_fee = short_positions[symbol][0]
+                    open_qty, open_total, open_tx_id, open_fee = short_positions[symbol][0]
                     close_qty = min(quantity_to_process, open_qty)
 
-                    # Closing short: P&L = (open_price - close_price) * quantity - fees
-                    # We profit when price goes down (bought back cheaper)
-                    trading_pl = (open_price - price) * close_qty
+                    # Closing short: P&L = (open_total - close_total) × ratio - fees
+                    # For stocks, total_amount is already the full amount
+                    # For options, we need to calculate proportionally
+                    close_total = total_amount * (close_qty / quantity)
+                    open_total_proportional = open_total * (close_qty / open_qty)
+                    trading_pl = open_total_proportional + close_total  # Both are negative, so adding gives profit
                     total_pl = trading_pl - open_fee - fee
 
-                    print(f"  CLOSE SHORT: {symbol} bought ${price} to close short opened at ${open_price} × {close_qty} = P&L ${total_pl}")
+                    print(f"  CLOSE SHORT: {symbol} bought ${abs(close_total):.2f} to close short opened at ${abs(open_total_proportional):.2f} × {close_qty} = P&L ${total_pl:.2f}")
 
-                    # Assign P&L to the closing (BUY) trade
+                    # Assign P&L only to the closing (BUY) trade
                     realized_pl[tx_id] = realized_pl.get(tx_id, 0) + total_pl
-                    # Also assign to the opening SELL for tracking
-                    realized_pl[open_tx_id] = realized_pl.get(open_tx_id, 0) + total_pl
 
                     if open_qty == close_qty:
                         short_positions[symbol].popleft()
                     else:
-                        short_positions[symbol][0] = (open_qty - close_qty, open_price, open_tx_id, open_fee)
+                        short_positions[symbol][0] = (open_qty - close_qty, open_total, open_tx_id, open_fee)
 
                     quantity_to_process -= close_qty
 
                 # Any remaining quantity opens a new long position
                 if quantity_to_process > 0:
-                    long_positions[symbol].append((quantity_to_process, price, tx_id, fee))
-                    print(f"  OPEN LONG: {symbol} bought {quantity_to_process} @ ${price} fee=${fee}")
+                    long_positions[symbol].append((quantity_to_process, total_amount, tx_id, fee))
+                    print(f"  OPEN LONG: {symbol} bought {quantity_to_process} @ ${price:.2f} (${abs(total_amount):.2f} total) fee=${fee:.2f}")
 
             elif side == 'SELL':
                 # SELL can either:
@@ -228,31 +249,31 @@ def update_data():
 
                 # First, try to close any existing long positions
                 while quantity_to_process > 0 and long_positions[symbol]:
-                    open_qty, open_price, open_tx_id, open_fee = long_positions[symbol][0]
+                    open_qty, open_total, open_tx_id, open_fee = long_positions[symbol][0]
                     close_qty = min(quantity_to_process, open_qty)
 
-                    # Closing long: P&L = (close_price - open_price) * quantity - fees
-                    trading_pl = (price - open_price) * close_qty
+                    # Closing long: P&L = (close_total - open_total) proportionally - fees
+                    close_total = total_amount * (close_qty / quantity)
+                    open_total_proportional = open_total * (close_qty / open_qty)
+                    trading_pl = close_total + open_total_proportional  # open_total is negative
                     total_pl = trading_pl - open_fee - fee
 
-                    print(f"  CLOSE LONG: {symbol} sold ${price} to close long opened at ${open_price} × {close_qty} = P&L ${total_pl}")
+                    print(f"  CLOSE LONG: {symbol} sold ${abs(close_total):.2f} to close long opened at ${abs(open_total_proportional):.2f} × {close_qty} = P&L ${total_pl:.2f}")
 
-                    # Assign P&L to the closing (SELL) trade
+                    # Assign P&L only to the closing (SELL) trade
                     realized_pl[tx_id] = realized_pl.get(tx_id, 0) + total_pl
-                    # Also assign to the opening BUY for tracking
-                    realized_pl[open_tx_id] = realized_pl.get(open_tx_id, 0) + total_pl
 
                     if open_qty == close_qty:
                         long_positions[symbol].popleft()
                     else:
-                        long_positions[symbol][0] = (open_qty - close_qty, open_price, open_tx_id, open_fee)
+                        long_positions[symbol][0] = (open_qty - close_qty, open_total, open_tx_id, open_fee)
 
                     quantity_to_process -= close_qty
 
                 # Any remaining quantity opens a new short position
                 if quantity_to_process > 0:
-                    short_positions[symbol].append((quantity_to_process, price, tx_id, fee))
-                    print(f"  OPEN SHORT: {symbol} sold {quantity_to_process} @ ${price} fee=${fee}")
+                    short_positions[symbol].append((quantity_to_process, total_amount, tx_id, fee))
+                    print(f"  OPEN SHORT: {symbol} sold {quantity_to_process} @ ${price:.2f} (${abs(total_amount):.2f} total) fee=${fee:.2f}")
 
         # Reset all P&L to 0 first, then update only closed positions
         c.execute('''UPDATE trades SET realized_pl = 0''')
