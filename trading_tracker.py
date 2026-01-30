@@ -25,7 +25,7 @@ def init_db():
     if _db_initialized:
         return
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     c = conn.cursor()
 
     # Trades table - individual legs
@@ -310,7 +310,7 @@ def update_data():
         print(f"Fetching history from {year_start} to {end_date}")
         history = fetch_order_history(token, account_id, year_start, end_date)
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
         c = conn.cursor()
 
         # Store trades
@@ -393,7 +393,7 @@ def update_data():
 
             c.execute('''INSERT OR REPLACE INTO spreads
                 (spread_id, spread_type, underlying, expiry, opened_date, closed_date, status, legs, entry_credit, realized_pl, unrealized_pl)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (spread['spread_id'], spread['type'], spread['underlying'], spread['expiry'],
                  spread['opened_date'], closed_date, status, json.dumps([l['transaction_id'] for l in spread['legs']]),
                  spread['entry_credit'], realized_pl, 0))  # Unrealized = 0 for now
@@ -464,7 +464,7 @@ def update_data():
 
 def get_stats():
     """Get trading statistics with spread grouping"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     c = conn.cursor()
 
     # Get all spreads
@@ -504,7 +504,7 @@ def get_stats():
 
 def get_trades(days=7):
     """Get recent trades grouped by spread"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     c = conn.cursor()
 
     # Get recent spreads
@@ -548,7 +548,7 @@ def update():
 @app.route('/api/reset')
 def reset():
     """Reset database"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     c = conn.cursor()
     c.execute('DELETE FROM trades')
     c.execute('DELETE FROM spreads')
