@@ -74,9 +74,9 @@
                 <div class="sub" id="total-closed">0 closed spreads</div>
             </div>
             <div class="stat-card">
-                <h3>Open Positions</h3>
-                <div class="value" id="open-count">0</div>
-                <div class="sub" id="open-unrealized">Unrealized: $0.00</div>
+                <h3>Total Unrealized P&L</h3>
+                <div class="value" id="total-unrealized-pl">$0.00</div>
+                <div class="sub" id="open-count-label">0 open spreads</div>
             </div>
             <div class="stat-card">
                 <h3>Total Spreads</h3>
@@ -127,15 +127,15 @@
             };
 
             setPl('total-pl', data.total_realized_pl);
+            setPl('total-unrealized-pl', data.total_unrealized_pl);
             document.getElementById('total-closed').textContent = `${data.closed_spreads} closed spreads`;
-            document.getElementById('open-count').textContent = data.open_spreads;
             document.getElementById('total-spreads').textContent = data.total_spreads;
             document.getElementById('closed-spreads').textContent = `${data.closed_spreads} closed`;
 
             const avgPl = data.closed_spreads > 0 ? data.total_realized_pl / data.closed_spreads : 0;
             setPl('avg-pl', avgPl);
 
-            document.getElementById('open-count-label').textContent = `(${data.open_spreads})`;
+            document.getElementById('open-count-label').textContent = `${data.open_spreads} open spreads`;
             document.getElementById('closed-count-label').textContent = `(${data.closed_spreads})`;
             document.getElementById('last-updated').textContent = new Date().toLocaleString();
 

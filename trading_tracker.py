@@ -85,6 +85,13 @@ def identify_spread_type(legs):
     calls = [l for l in legs if l['opt_type'] == 'C']
     puts = [l for l in legs if l['opt_type'] == 'P']
 
+    # Debug logging for unknown spreads
+    if len(legs) != 2:
+        print(f"  DEBUG: Not 2 legs: {len(legs)} legs")
+        for leg in legs:
+            print(f"    {leg['symbol']} - {leg['opt_type']} - {leg['side']} - strike:{leg['strike']} - qty:{leg['quantity']}")
+        return "Unknown Spread"
+
     if len(calls) == 2 and len(puts) == 0:
         long_calls = [l for l in calls if l['side'] == 'BUY']
         short_calls = [l for l in calls if l['side'] == 'SELL']
@@ -93,6 +100,9 @@ def identify_spread_type(legs):
                 return "Bull Call Spread (Debit)"
             else:
                 return "Bear Call Spread (Credit)"
+        else:
+            print(f"  DEBUG: 2 calls but no BUY/SELL pair: both {[l['side'] for l in calls]}")
+            return "Unknown Spread"
 
     if len(puts) == 2 and len(calls) == 0:
         long_puts = [l for l in puts if l['side'] == 'BUY']
@@ -102,10 +112,14 @@ def identify_spread_type(legs):
                 return "Bear Put Spread (Debit)"
             else:
                 return "Bull Put Spread (Credit)"
+        else:
+            print(f"  DEBUG: 2 puts but no BUY/SELL pair: both {[l['side'] for l in puts]}")
+            return "Unknown Spread"
 
     if len(calls) == 2 and len(puts) == 2:
         return "Iron Condor"
 
+    print(f"  DEBUG: Mixed legs - {len(calls)} calls, {len(puts)} puts")
     return "Unknown Spread"
 
 def group_trades_into_spreads(trades):
@@ -224,6 +238,42 @@ def fetch_order_history(token, account_id, start_date, end_date):
     response = get(url, params=params, headers={'Authorization': f'Bearer {token}'})
     return response.json()
 
+def fetch_portfolio(token, account_id):
+    """Fetch current portfolio for unrealized P&L calculation"""
+    url = f"https://api.public.com/userapigateway/trading/{account_id}/portfolio/v2"
+    response = get(url, headers={'Authorization': f'Bearer {token}'})
+    return response.json()
+
+def calculate_unrealized_pl(spread, portfolio_positions):
+    """Calculate unrealized P&L for an open spread using current market prices"""
+    try:
+        legs = json.loads(spread['legs'])
+        total_current_value = 0
+
+        for leg_tx_id in legs:
+            # Find matching position in portfolio
+            # Portfolio positions contain: symbol, quantity, averagePrice, currentPrice
+            for pos in portfolio_positions:
+                if pos.get('symbol') and leg_tx_id in str(pos):
+                    # Current value = quantity × currentPrice
+                    # For long: positive value, for short: negative value
+                    qty = float(pos.get('quantity', 0))
+                    current_price = float(pos.get('currentPrice', pos.get('averagePrice', 0)))
+                    position_value = qty * current_price
+                    total_current_value += position_value
+                    break
+
+        # Unrealized P&L = current spread value - entry credit
+        # For credit spread (positive entry): profit if current value < entry
+        # For debit spread (negative entry): profit if current value > entry
+        entry_value = spread['entry_credit']
+        unrealized_pl = total_current_value - entry_value
+
+        return unrealized_pl
+    except Exception as e:
+        print(f"  Error calculating unrealized P&L for spread {spread['spread_id']}: {e}")
+        return 0
+
 def update_data():
     """Fetch latest data and update database"""
     try:
@@ -278,14 +328,34 @@ def update_data():
 
         spreads, single_legs, stock_trades = group_trades_into_spreads(all_trades)
 
-        # Store spreads
+        # Fetch portfolio for current prices (unrealized P&L)
+        print("Fetching portfolio for unrealized P&L...")
+        portfolio_data = fetch_portfolio(token, account_id)
+        portfolio_positions = portfolio_data.get('positions', [])
+        print(f"Portfolio has {len(portfolio_positions)} positions")
+
+        # Store spreads with unrealized P&L
         for spread in spreads:
+            # Calculate unrealized P&L for open spreads
+            unrealized_pl = 0
+            if portfolio_positions:
+                unrealized_pl = calculate_unrealized_pl({
+                    'spread_id': spread['spread_id'],
+                    'legs': json.dumps([l['transaction_id'] for l in spread['legs']]),
+                    'entry_credit': spread['entry_credit']
+                }, portfolio_positions)
+
             c.execute('''INSERT OR REPLACE INTO spreads
-                (spread_id, spread_type, underlying, expiry, opened_date, status, legs, entry_credit, realized_pl)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (spread_id, spread_type, underlying, expiry, opened_date, status, legs, entry_credit, realized_pl, unrealized_pl)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (spread['spread_id'], spread['type'], spread['underlying'], spread['expiry'],
                  spread['opened_date'], 'open', json.dumps([l['transaction_id'] for l in spread['legs']]),
-                 spread['entry_credit'], 0))
+                 spread['entry_credit'], 0, unrealized_pl))
+
+            if spread['entry_credit'] >= 0:
+                print(f"  {spread['underlying']} {spread['type']}: Entry +${spread['entry_credit']:.2f}, Unrealized: ${unrealized_pl:+.2f}")
+            else:
+                print(f"  {spread['underlying']} {spread['type']}: Entry -${abs(spread['entry_credit']):.2f}, Unrealized: ${unrealized_pl:+.2f}")
 
             # Link trades to spread
             for leg_id in spread['leg_ids']:
@@ -318,6 +388,7 @@ def get_stats():
     open_spreads = [s for s in spreads if s['status'] == 'open']
 
     total_realized_pl = sum(s['realized_pl'] for s in closed_spreads)
+    total_unrealized_pl = sum(s.get('unrealized_pl', 0) for s in open_spreads)
 
     conn.close()
 
@@ -326,7 +397,8 @@ def get_stats():
         'open_spreads': len(open_spreads),
         'closed_spreads': len(closed_spreads),
         'total_realized_pl': total_realized_pl,
-        'spreads': spreads[:20]  # Return recent 20
+        'total_unrealized_pl': total_unrealized_pl,
+        'spreads': spreads[:50]  # Return more for dashboard
     }
 
 def get_trades(days=7):
