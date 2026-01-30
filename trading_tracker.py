@@ -216,15 +216,21 @@ def update_data():
                     open_qty, open_total, open_tx_id, open_fee = short_positions[symbol][0]
                     close_qty = min(quantity_to_process, open_qty)
 
-                    # Closing short: P&L = (open_total - close_total) × ratio - fees
-                    # For stocks, total_amount is already the full amount
-                    # For options, we need to calculate proportionally
-                    close_total = total_amount * (close_qty / quantity)
-                    open_total_proportional = open_total * (close_qty / open_qty)
-                    trading_pl = open_total_proportional + close_total  # Both are negative, so adding gives profit
+                    # Closing short: P&L = (open_total - close_total) proportionally - fees
+                    # total_amount already includes quantity, so only use proportion for partial closes
+                    if close_qty == open_qty and open_qty == quantity:
+                        # Full close: use totals directly
+                        close_total_for_calc = total_amount
+                        open_total_for_calc = open_total
+                    else:
+                        # Partial close: calculate proportion
+                        close_total_for_calc = total_amount * (close_qty / quantity)
+                        open_total_for_calc = open_total * (close_qty / open_qty)
+
+                    trading_pl = open_total_for_calc + close_total_for_calc  # Both negative, adding = profit
                     total_pl = trading_pl - open_fee - fee
 
-                    print(f"  CLOSE SHORT: {symbol} bought ${abs(close_total):.2f} to close short opened at ${abs(open_total_proportional):.2f} × {close_qty} = P&L ${total_pl:.2f}")
+                    print(f"  CLOSE SHORT: {symbol} bought ${abs(close_total_for_calc):.2f} to close short opened at ${abs(open_total_for_calc):.2f} × {close_qty} = P&L ${total_pl:.2f}")
 
                     # Assign P&L only to the closing (BUY) trade
                     realized_pl[tx_id] = realized_pl.get(tx_id, 0) + total_pl
@@ -253,12 +259,20 @@ def update_data():
                     close_qty = min(quantity_to_process, open_qty)
 
                     # Closing long: P&L = (close_total - open_total) proportionally - fees
-                    close_total = total_amount * (close_qty / quantity)
-                    open_total_proportional = open_total * (close_qty / open_qty)
-                    trading_pl = close_total + open_total_proportional  # open_total is negative
+                    # total_amount already includes quantity, so only use proportion for partial closes
+                    if close_qty == open_qty and open_qty == abs(quantity):
+                        # Full close: use totals directly
+                        close_total_for_calc = total_amount
+                        open_total_for_calc = open_total
+                    else:
+                        # Partial close: calculate proportion
+                        close_total_for_calc = total_amount * (close_qty / abs(quantity))
+                        open_total_for_calc = open_total * (close_qty / open_qty)
+
+                    trading_pl = close_total_for_calc + open_total_for_calc  # open_total is negative
                     total_pl = trading_pl - open_fee - fee
 
-                    print(f"  CLOSE LONG: {symbol} sold ${abs(close_total):.2f} to close long opened at ${abs(open_total_proportional):.2f} × {close_qty} = P&L ${total_pl:.2f}")
+                    print(f"  CLOSE LONG: {symbol} sold ${abs(close_total_for_calc):.2f} to close long opened at ${abs(open_total_for_calc):.2f} × {close_qty} = P&L ${total_pl:.2f}")
 
                     # Assign P&L only to the closing (SELL) trade
                     realized_pl[tx_id] = realized_pl.get(tx_id, 0) + total_pl
