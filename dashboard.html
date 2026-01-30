@@ -69,9 +69,14 @@
 
         <div class="stats-grid">
             <div class="stat-card">
-                <h3>Total Realized P&L</h3>
-                <div class="value" id="total-pl">$0.00</div>
-                <div class="sub" id="total-closed">0 closed spreads</div>
+                <h3>MTD Realized P&L</h3>
+                <div class="value" id="mtd-pl">$0.00</div>
+                <div class="sub" id="mtd-closed">0 closed this month</div>
+            </div>
+            <div class="stat-card">
+                <h3>YTD Realized P&L</h3>
+                <div class="value" id="ytd-pl">$0.00</div>
+                <div class="sub" id="ytd-closed">0 closed this year</div>
             </div>
             <div class="stat-card">
                 <h3>Total Unrealized P&L</h3>
@@ -82,11 +87,6 @@
                 <h3>Total Spreads</h3>
                 <div class="value" id="total-spreads">0</div>
                 <div class="sub" id="closed-spreads">0 closed</div>
-            </div>
-            <div class="stat-card">
-                <h3>Average P&L</h3>
-                <div class="value" id="avg-pl">$0.00</div>
-                <div class="sub">Per closed spread</div>
             </div>
         </div>
 
@@ -131,16 +131,15 @@
                 el.className = 'value ' + (val >= 0 ? 'positive' : 'negative');
             };
 
-            setPl('total-pl', data.total_realized_pl);
+            setPl('mtd-pl', data.mtd_realized_pl);
+            setPl('ytd-pl', data.ytd_realized_pl);
             setPl('total-unrealized-pl', data.total_unrealized_pl);
-            document.getElementById('total-closed').textContent = `${data.closed_spreads} closed spreads`;
+            document.getElementById('mtd-closed').textContent = `${data.mtd_closed} closed this month`;
+            document.getElementById('ytd-closed').textContent = `${data.ytd_closed} closed this year`;
             document.getElementById('total-spreads').textContent = data.total_spreads;
             document.getElementById('closed-spreads').textContent = `${data.closed_spreads} closed`;
             document.getElementById('open-spreads-count').textContent = data.open_spreads;
             document.getElementById('single-legs-count').textContent = data.open_single_legs || 0;
-
-            const avgPl = (data.closed_spreads + (data.closed_single_legs || 0)) > 0 ? data.total_realized_pl / (data.closed_spreads + data.closed_single_legs) : 0;
-            setPl('avg-pl', avgPl);
 
             document.getElementById('open-count-label').textContent = `${data.open_spreads} open spreads`;
             document.getElementById('closed-count-label').textContent = `(${data.closed_spreads})`;

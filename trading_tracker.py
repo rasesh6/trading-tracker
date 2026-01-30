@@ -547,8 +547,24 @@ def get_stats():
     open_single_legs = [l for l in single_legs if l['status'] == 'open']
     closed_single_legs = [l for l in single_legs if l['status'] == 'closed']
 
+    # Total realized P&L (all time)
     total_realized_pl = sum(s['realized_pl'] for s in closed_spreads) + sum(l['realized_pl'] for l in closed_single_legs)
     total_unrealized_pl = sum(s.get('unrealized_pl', 0) for s in open_spreads) + sum(l.get('unrealized_pl', 0) for l in open_single_legs)
+
+    # MTD (Month-to-Date) realized P&L
+    now = datetime.now()
+    month_start = datetime(now.year, now.month, 1)
+
+    mtd_spreads = [s for s in closed_spreads if s.get('closed_date') and datetime.fromisoformat(s['closed_date']) >= month_start]
+    mtd_legs = [l for l in closed_single_legs if l.get('closed_date') and datetime.fromisoformat(l['closed_date']) >= month_start]
+    mtd_realized_pl = sum(s['realized_pl'] for s in mtd_spreads) + sum(l['realized_pl'] for l in mtd_legs)
+
+    # YTD (Year-to-Date) realized P&L
+    year_start = datetime(now.year, 1, 1)
+
+    ytd_spreads = [s for s in closed_spreads if s.get('closed_date') and datetime.fromisoformat(s['closed_date']) >= year_start]
+    ytd_legs = [l for l in closed_single_legs if l.get('closed_date') and datetime.fromisoformat(l['closed_date']) >= year_start]
+    ytd_realized_pl = sum(s['realized_pl'] for s in ytd_spreads) + sum(l['realized_pl'] for l in ytd_legs)
 
     conn.close()
 
@@ -561,6 +577,10 @@ def get_stats():
         'closed_single_legs': len(closed_single_legs),
         'total_realized_pl': total_realized_pl,
         'total_unrealized_pl': total_unrealized_pl,
+        'mtd_realized_pl': mtd_realized_pl,
+        'ytd_realized_pl': ytd_realized_pl,
+        'mtd_closed': len(mtd_spreads) + len(mtd_legs),
+        'ytd_closed': len(ytd_spreads) + len(ytd_legs),
         'spreads': spreads[:50],
         'single_legs': single_legs[:50]
     }
