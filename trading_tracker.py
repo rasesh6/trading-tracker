@@ -555,15 +555,51 @@ def get_stats():
     now = datetime.now()
     month_start = datetime(now.year, now.month, 1)
 
-    mtd_spreads = [s for s in closed_spreads if s.get('closed_date') and datetime.fromisoformat(s['closed_date']) >= month_start]
-    mtd_legs = [l for l in closed_single_legs if l.get('closed_date') and datetime.fromisoformat(l['closed_date']) >= month_start]
+    mtd_spreads = []
+    for s in closed_spreads:
+        if s.get('closed_date'):
+            try:
+                closed_dt = datetime.fromisoformat(s['closed_date'].replace('Z', '+00:00'))
+                if closed_dt.replace(tzinfo=None) >= month_start:
+                    mtd_spreads.append(s)
+            except:
+                pass
+
+    mtd_legs = []
+    for l in closed_single_legs:
+        if l.get('closed_date'):
+            try:
+                closed_dt = datetime.fromisoformat(l['closed_date'].replace('Z', '+00:00'))
+                if closed_dt.replace(tzinfo=None) >= month_start:
+                    mtd_legs.append(l)
+            except:
+                pass
+
     mtd_realized_pl = sum(s['realized_pl'] for s in mtd_spreads) + sum(l['realized_pl'] for l in mtd_legs)
 
     # YTD (Year-to-Date) realized P&L
     year_start = datetime(now.year, 1, 1)
 
-    ytd_spreads = [s for s in closed_spreads if s.get('closed_date') and datetime.fromisoformat(s['closed_date']) >= year_start]
-    ytd_legs = [l for l in closed_single_legs if l.get('closed_date') and datetime.fromisoformat(l['closed_date']) >= year_start]
+    ytd_spreads = []
+    for s in closed_spreads:
+        if s.get('closed_date'):
+            try:
+                closed_dt = datetime.fromisoformat(s['closed_date'].replace('Z', '+00:00'))
+                if closed_dt.replace(tzinfo=None) >= year_start:
+                    ytd_spreads.append(s)
+            except:
+                pass
+
+    ytd_legs = []
+    for l in closed_single_legs:
+        if l.get('closed_date'):
+            try:
+                closed_dt = datetime.fromisoformat(l['closed_date'].replace('Z', '+00:00'))
+                if closed_dt.replace(tzinfo=None) >= year_start:
+                    ytd_legs.append(l)
+            except:
+                pass
+
     ytd_realized_pl = sum(s['realized_pl'] for s in ytd_spreads) + sum(l['realized_pl'] for l in ytd_legs)
 
     conn.close()
