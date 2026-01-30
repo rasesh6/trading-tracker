@@ -528,41 +528,48 @@ def update_data():
 
                 # Debug: log if no closing trades found
                 if not closing_trades_for_leg:
-                    # Find trades with same underlying to see what's available
-                    same_underlying = [t for t in all_trades if t.get('symbol', '').startswith(leg['underlying'])]
-                    print(f"  DEBUG {leg['underlying']} {leg['opt_type']} @ ${leg['strike']}: No closing trades found for symbol {leg['symbol']} (side: {leg['side']})")
-                    print(f"  DEBUG Available trades for {leg['underlying']}:")
-                    for st in same_underlying[:5]:  # Show first 5
-                        print(f"    {st['symbol']} {st['side']} qty={st['quantity']} tx={st['transaction_id'][:8]}")
-                    if len(same_underlying) > 5:
-                        print(f"    ... and {len(same_underlying) - 5} more")
+                    # If status is closed but no closing trades found, it likely expired worthless or was assigned
+                    # For expired/assigned short options: full premium received is profit
+                    # For expired/assigned long options: full premium paid is loss
+                    print(f"  DEBUG {leg['underlying']} {leg['opt_type']} @ ${leg['strike']}: No closing trades found for symbol {leg['symbol']} (side: {leg['side']}) - likely expired/assigned")
 
-                # Use FIFO matching (earliest trades first)
-                closing_trades_for_leg.sort(key=lambda x: x['timestamp'])
-
-                # Match quantities
-                remaining_qty = abs(leg['quantity'])
-                leg_exit = 0
-
-                for ct in closing_trades_for_leg:
-                    if remaining_qty <= 0:
-                        break
-
-                    ct_qty = abs(ct['quantity'])
-                    match_qty = min(remaining_qty, ct_qty)
-
-                    # Pro-rate the exit amount
-                    exit_amount = ct['total_amount'] * (match_qty / ct_qty)
-                    leg_exit += exit_amount
-
-                    # Mark as used
-                    global_used_closing_tx_ids.add(ct['transaction_id'])
-                    remaining_qty -= match_qty
-
-                if leg_exit != 0:
+                    # Calculate P&L assuming expiration/assignment
                     entry_amount = leg['total_amount']
-                    # P&L = entry + exit
-                    realized_pl = entry_amount + leg_exit
+                    if leg['side'] == 'SELL':
+                        # Short option expired worthless = keep all premium as profit
+                        realized_pl = abs(entry_amount)
+                    else:
+                        # Long option expired worthless = lose all premium
+                        realized_pl = entry_amount  # already negative
+
+                    print(f"  {leg['underlying']} {leg['opt_type']} @ ${leg['strike']}: EXPIRED/ASSIGNED - P&L ${realized_pl:+.2f}")
+                else:
+                    # Use FIFO matching (earliest trades first)
+                    closing_trades_for_leg.sort(key=lambda x: x['timestamp'])
+
+                    # Match quantities
+                    remaining_qty = abs(leg['quantity'])
+                    leg_exit = 0
+
+                    for ct in closing_trades_for_leg:
+                        if remaining_qty <= 0:
+                            break
+
+                        ct_qty = abs(ct['quantity'])
+                        match_qty = min(remaining_qty, ct_qty)
+
+                        # Pro-rate the exit amount
+                        exit_amount = ct['total_amount'] * (match_qty / ct_qty)
+                        leg_exit += exit_amount
+
+                        # Mark as used
+                        global_used_closing_tx_ids.add(ct['transaction_id'])
+                        remaining_qty -= match_qty
+
+                    if leg_exit != 0:
+                        entry_amount = leg['total_amount']
+                        # P&L = entry + exit
+                        realized_pl = entry_amount + leg_exit
             elif status == 'open' and portfolio_positions:
                 for pos in portfolio_positions:
                     pos_symbol = pos.get('instrument', {}).get('symbol', '')
