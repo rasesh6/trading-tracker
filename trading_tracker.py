@@ -526,6 +526,17 @@ def update_data():
                         t['transaction_id'] not in global_used_closing_tx_ids):  # Not already used
                         closing_trades_for_leg.append(t)
 
+                # Debug: log if no closing trades found
+                if not closing_trades_for_leg:
+                    # Find trades with same underlying to see what's available
+                    same_underlying = [t for t in all_trades if t.get('symbol', '').startswith(leg['underlying'])]
+                    print(f"  DEBUG {leg['underlying']} {leg['opt_type']} @ ${leg['strike']}: No closing trades found for symbol {leg['symbol']} (side: {leg['side']})")
+                    print(f"  DEBUG Available trades for {leg['underlying']}:")
+                    for st in same_underlying[:5]:  # Show first 5
+                        print(f"    {st['symbol']} {st['side']} qty={st['quantity']} tx={st['transaction_id'][:8]}")
+                    if len(same_underlying) > 5:
+                        print(f"    ... and {len(same_underlying) - 5} more")
+
                 # Use FIFO matching (earliest trades first)
                 closing_trades_for_leg.sort(key=lambda x: x['timestamp'])
 
