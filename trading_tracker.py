@@ -663,6 +663,82 @@ def get_stats():
     leg_columns = ['id', 'leg_id', 'underlying', 'expiry', 'strike', 'opt_type', 'side', 'quantity', 'entry_price', 'opened_date', 'closed_date', 'status', 'transaction_id', 'realized_pl', 'unrealized_pl']
     single_legs = [dict(zip(leg_columns, row)) for row in c.fetchall()]
 
+    # Get all trades (for stock positions)
+    c.execute('''SELECT * FROM trades ORDER BY timestamp DESC''')
+    trade_columns = ['id', 'transaction_id', 'symbol', 'underlying', 'expiry', 'strike', 'opt_type', 'side', 'quantity', 'price', 'total_amount', 'timestamp', 'fee_amount', 'spread_id', 'realized_pl']
+    all_trades = [dict(zip(trade_columns, row)) for row in c.fetchall()]
+
+    # Fetch portfolio to get current stock positions
+    stock_unrealized_pl = 0
+    open_stock_positions = []
+    try:
+        token = get_access_token()
+        account_id = get_account_id(token)
+        portfolio_response = get(
+            f'https://api.public.com/userapigateway/trading/{account_id}/portfolio/v2',
+            headers={'Authorization': f'Bearer {token}'}
+        )
+        portfolio_positions = portfolio_response.json().get('positions', [])
+
+        print(f"DEBUG portfolio: {len(portfolio_positions)} positions for unrealized P&L calculation")
+
+        # Calculate unrealized P&L for stock positions
+        for pos in portfolio_positions:
+            pos_symbol = pos.get('instrument', {}).get('symbol', '')
+            current_value = float(pos.get('currentValue', 0))
+            quantity = float(pos.get('quantity', 0))
+
+            # Only process stock positions (not options which end with -OPTION)
+            if pos_symbol and not pos_symbol.endswith('-OPTION') and quantity != 0:
+                # Try costBasis from portfolio API first (most accurate for long-term holds)
+                cost_basis = pos.get('costBasis', {})
+                if cost_basis and cost_basis.get('totalCost'):
+                    entry_value = float(cost_basis['totalCost'])
+                    unrealized_pl = current_value - entry_value
+                    stock_unrealized_pl += unrealized_pl
+                    open_stock_positions.append({
+                        'symbol': pos_symbol,
+                        'quantity': abs(quantity),
+                        'entry_value': entry_value,
+                        'current_value': current_value,
+                        'unrealized_pl': unrealized_pl
+                    })
+                    print(f"  Stock {pos_symbol}: {abs(quantity)} shares, entry=${entry_value:.2f}, current=${current_value:.2f}, P&L=${unrealized_pl:+.2f}")
+                else:
+                    # Fallback: calculate from trades in database
+                    stock_trades = [t for t in all_trades if t['symbol'] == pos_symbol and t['opt_type'] == 'STOCK']
+                    if stock_trades:
+                        # Calculate weighted average entry price
+                        total_qty = 0
+                        total_cost = 0
+                        for t in stock_trades:
+                            qty = t['quantity']
+                            cost = abs(t['total_amount'])  # Total cost for this trade
+                            if t['side'] == 'BUY':
+                                total_qty += qty
+                                total_cost += cost
+                            else:  # SELL
+                                total_qty -= qty
+                                total_cost -= cost
+
+                        if total_qty != 0:
+                            avg_entry_price = total_cost / total_qty
+                            # For stocks: unrealized_pl = (current_price - entry_price) * quantity
+                            # currentValue is already current_price * quantity
+                            entry_value = avg_entry_price * total_qty
+                            unrealized_pl = current_value - entry_value
+                            stock_unrealized_pl += unrealized_pl
+                            open_stock_positions.append({
+                                'symbol': pos_symbol,
+                                'quantity': total_qty,
+                                'entry_value': entry_value,
+                                'current_value': current_value,
+                                'unrealized_pl': unrealized_pl
+                            })
+                            print(f"  Stock {pos_symbol} (from trades): {total_qty} shares, entry=${entry_value:.2f}, current=${current_value:.2f}, P&L=${unrealized_pl:+.2f}")
+    except Exception as e:
+        print(f"DEBUG: Error fetching portfolio for unrealized P&L: {e}")
+
     # Calculate stats
     closed_spreads = [s for s in spreads if s['status'] == 'closed']
     open_spreads = [s for s in spreads if s['status'] == 'open']
@@ -680,8 +756,10 @@ def get_stats():
         print(f"  {l['underlying']} {l['opt_type']} @ ${l['strike']} {l['side']}: ${l['realized_pl']:+.2f}")
 
     total_realized_pl = sum(s['realized_pl'] for s in closed_spreads) + sum(l['realized_pl'] for l in closed_single_legs)
-    total_unrealized_pl = sum(s.get('unrealized_pl', 0) for s in open_spreads) + sum(l.get('unrealized_pl', 0) for l in open_single_legs)
+    options_unrealized_pl = sum(s.get('unrealized_pl', 0) for s in open_spreads) + sum(l.get('unrealized_pl', 0) for l in open_single_legs)
+    total_unrealized_pl = options_unrealized_pl + stock_unrealized_pl
     print(f"DEBUG get_stats: total_realized_pl = ${total_realized_pl:+.2f} (spreads: ${sum(s['realized_pl'] for s in closed_spreads):+.2f} + legs: ${sum(l['realized_pl'] for l in closed_single_legs):+.2f})")
+    print(f"DEBUG get_stats: total_unrealized_pl = ${total_unrealized_pl:+.2f} (options: ${options_unrealized_pl:+.2f} + stocks: ${stock_unrealized_pl:+.2f})")
 
     # MTD (Month-to-Date) realized P&L
     now = datetime.now()
@@ -743,6 +821,7 @@ def get_stats():
         'total_single_legs': len(single_legs),
         'open_single_legs': len(open_single_legs),
         'closed_single_legs': len(closed_single_legs),
+        'open_stocks': len(open_stock_positions),
         'total_realized_pl': total_realized_pl,
         'total_unrealized_pl': total_unrealized_pl,
         'mtd_realized_pl': mtd_realized_pl,
@@ -750,7 +829,8 @@ def get_stats():
         'mtd_closed': len(mtd_spreads) + len(mtd_legs),
         'ytd_closed': len(ytd_spreads) + len(ytd_legs),
         'spreads': spreads[:50],
-        'single_legs': single_legs[:50]
+        'single_legs': single_legs[:50],
+        'stock_positions': open_stock_positions
     }
 
 def get_trades(days=7):
