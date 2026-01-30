@@ -191,37 +191,50 @@ def group_trades_into_spreads(trades):
                 else:
                     break
 
-            if len(group) >= 2:
-                # Found a spread!
+            if len(group) == 2:
+                # Found a potential spread (exactly 2 legs)
                 spread_type = identify_spread_type(group)
-                spread_id = f"{group[0]['underlying']}_{group[0]['expiry']}_{current['datetime'].strftime('%Y%m%d%H%M')}"
 
-                # Calculate entry credit/debit with detailed logging
-                entry_credit = 0
-                print(f"  SPREAD {spread_id}: {spread_type}")
-                for leg in group:
-                    leg_contrib = leg['total_amount']  # Use raw amount
-                    entry_credit += leg_contrib
-                    print(f"    {leg['symbol']}: {leg['side']} {leg['quantity']} @ ${leg['price']:.2f} = ${leg_contrib:+.2f}")
+                # Only treat as spread if successfully identified
+                if spread_type != "Unknown Spread":
+                    spread_id = f"{group[0]['underlying']}_{group[0]['expiry']}_{current['datetime'].strftime('%Y%m%d%H%M')}"
 
-                print(f"    → Net entry: ${entry_credit:+.2f}")
+                    # Calculate entry credit/debit with detailed logging
+                    entry_credit = 0
+                    print(f"  SPREAD {spread_id}: {spread_type}")
+                    for leg in group:
+                        leg_contrib = leg['total_amount']  # Use raw amount
+                        entry_credit += leg_contrib
+                        print(f"    {leg['symbol']}: {leg['side']} {leg['quantity']} @ ${leg['price']:.2f} = ${leg_contrib:+.2f}")
 
-                spreads.append({
-                    'spread_id': spread_id,
-                    'type': spread_type,
-                    'underlying': group[0]['underlying'],
-                    'expiry': group[0]['expiry'],
-                    'opened_date': current['datetime'].isoformat(),
-                    'legs': group,
-                    'entry_credit': entry_credit,
-                    'leg_ids': [l['transaction_id'] for l in group]
-                })
+                    print(f"    → Net entry: ${entry_credit:+.2f}")
 
-                for leg in group:
-                    processed.add(leg['transaction_id'])
+                    spreads.append({
+                        'spread_id': spread_id,
+                        'type': spread_type,
+                        'underlying': group[0]['underlying'],
+                        'expiry': group[0]['expiry'],
+                        'opened_date': current['datetime'].isoformat(),
+                        'legs': group,
+                        'entry_credit': entry_credit,
+                        'leg_ids': [l['transaction_id'] for l in group]
+                    })
+
+                    for leg in group:
+                        processed.add(leg['transaction_id'])
+                else:
+                    # Unknown spread type - treat as single legs
+                    print(f"  Group of {len(group)} legs with unknown type, treating as single legs")
+                    for leg in group:
+                        single_legs.append(leg)
+                        processed.add(leg['transaction_id'])
             else:
-                # Single leg
-                single_legs.append(current)
+                # Not exactly 2 legs (could be 1, 3, 4, etc.) - treat each as single leg
+                if len(group) > 2:
+                    print(f"  Group of {len(group)} legs, treating each as single leg")
+                for leg in group:
+                    single_legs.append(leg)
+                    processed.add(leg['transaction_id'])
 
             i += 1
 
@@ -353,8 +366,13 @@ def update_data():
         print("Fetching portfolio to detect closed positions...")
         portfolio_data = fetch_portfolio(token, account_id)
         portfolio_positions = portfolio_data.get('positions', [])
-        portfolio_symbols = set(pos.get('symbol', '') for pos in portfolio_positions)
-        print(f"Portfolio has {len(portfolio_positions)} positions: {list(portfolio_symbols)[:10]}")
+
+        # Debug: print first portfolio position structure
+        if portfolio_positions:
+            print(f"First portfolio position: {portfolio_positions[0]}")
+
+        portfolio_symbols = set(pos.get('symbol', '') for pos in portfolio_positions if pos.get('symbol'))
+        print(f"Portfolio has {len(portfolio_positions)} positions, symbols: {list(portfolio_symbols)}")
 
         # Determine which spreads are open vs closed
         # A spread is open if any of its leg symbols are in the current portfolio
