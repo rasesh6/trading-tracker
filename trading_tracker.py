@@ -299,7 +299,7 @@ def health():
 
 @app.route('/api/debug/all_positions')
 def debug_all_positions():
-    """Debug endpoint to show all positions (open + closed)"""
+    """Debug endpoint to show all positions and check Portfolio API for open positions"""
     try:
         token = get_access_token()
         account_id = get_account_id(token)
@@ -308,8 +308,25 @@ def debug_all_positions():
         year_start = datetime(now.year, 1, 1).strftime('%Y-%m-%dT%H:%M:%SZ')
         end_date = now.strftime('%Y-%m-%dT%H:%M:%SZ')
 
+        # Fetch History API (YTD transactions)
         history = fetch_order_history(token, account_id, year_start, end_date)
         transactions = history.get('transactions', [])
+
+        # Fetch Portfolio API (current open positions)
+        portfolio_response = get(
+            f'https://api.public.com/userapigateway/trading/{account_id}/portfolio',
+            headers={'Authorization': f'Bearer {token}'}
+        )
+        portfolio = portfolio_response.json()
+
+        # Extract currently open option positions from Portfolio
+        open_in_portfolio = set()
+        if 'positions' in portfolio:
+            for pos in portfolio['positions']:
+                symbol = pos.get('symbol', '')
+                # Option symbols have format like "NVDA260123P00175000"
+                if re.match(r'[A-Z]+2\d{2}\d{3}[CP]\d{8}', symbol):
+                    open_in_portfolio.add(symbol)
 
         # Group all trades by contract
         all_trades = {}
@@ -333,7 +350,7 @@ def debug_all_positions():
                 contract = parts[2] if len(parts) > 2 else 'UNKNOWN'
 
             if contract not in all_trades:
-                all_trades[contract] = {'buy': 0, 'sell': 0, 'count': 0, 'sample': ''}
+                all_trades[contract] = {'buy': 0, 'sell': 0, 'count': 0, 'sample': '', 'in_portfolio': contract in open_in_portfolio}
 
             if 'BUY' in description:
                 all_trades[contract]['buy'] += net_amount
@@ -348,32 +365,46 @@ def debug_all_positions():
         only_buy = {k: v for k, v in all_trades.items() if v['buy'] != 0 and v['sell'] == 0}
         only_sell = {k: v for k, v in all_trades.items() if v['buy'] == 0 and v['sell'] != 0}
 
+        # Further categorize only_sell by whether they're in portfolio
+        only_sell_open = {k: v for k, v in only_sell.items() if v.get('in_portfolio', False)}
+        only_sell_not_in_portfolio = {k: v for k, v in only_sell.items() if not v.get('in_portfolio', False)}
+
         closed_pl = sum(v['buy'] + v['sell'] for v in closed.values())
         only_buy_pl = sum(v['buy'] for v in only_buy.values())
         only_sell_pl = sum(v['sell'] for v in only_sell.values())
+        only_sell_not_in_portfolio_pl = sum(v['sell'] for v in only_sell_not_in_portfolio.values())
+
+        # Calculate what happens if we add sell-only that are NOT in portfolio (likely expired)
+        with_expired_pl = closed_pl + only_sell_not_in_portfolio_pl
 
         return jsonify({
+            'portfolio_open_options': list(open_in_portfolio),
             'closed_positions': {
                 'count': len(closed),
                 'total_pl': closed_pl,
-                'positions': dict(list(closed.items())[:10])  # First 10
+                'positions': dict(list(closed.items())[:10])
             },
             'only_buy': {
                 'count': len(only_buy),
                 'total_pl': only_buy_pl,
-                'positions': dict(list(only_buy.items())[:10])
+                'positions': dict(list(only_buy.items())[:5])
             },
-            'only_sell': {
-                'count': len(only_sell),
-                'total_pl': only_sell_pl,
-                'positions': dict(list(only_sell.items())[:10])
+            'only_sell_open_in_portfolio': {
+                'count': len(only_sell_open),
+                'total_pl': sum(v['sell'] for v in only_sell_open.values()),
+                'positions': only_sell_open
+            },
+            'only_sell_not_in_portfolio': {
+                'count': len(only_sell_not_in_portfolio),
+                'total_pl': only_sell_not_in_portfolio_pl,
+                'positions': only_sell_not_in_portfolio
             },
             'summary': {
                 'closed_only_pl': closed_pl,
-                'closed_plus_sell_only': closed_pl + only_sell_pl,
+                'with_expired_worthless': with_expired_pl,
                 'target': 3693.32,
                 'closed_diff': closed_pl - 3693.32,
-                'with_sell_diff': (closed_pl + only_sell_pl) - 3693.32
+                'with_expired_diff': with_expired_pl - 3693.32
             }
         })
 
