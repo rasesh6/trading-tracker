@@ -963,6 +963,15 @@ def reset():
     conn.close()
     return jsonify({'status': 'reset'})
 
+@app.route('/api/health')
+def health():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'ok',
+        'timestamp': datetime.now().isoformat(),
+        'db_initialized': _db_initialized
+    })
+
 if __name__ == '__main__':
     init_db()
     app.run(host='0.0.0.0', port=8080)
