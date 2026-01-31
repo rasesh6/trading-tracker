@@ -146,9 +146,20 @@ def calculate_pl_from_history():
             data['any_in_portfolio'] = False
 
         # Re-check portfolio more carefully - extract full option contracts
+        # Also check for STOCK positions that might be from assignment
+        stock_symbols_in_portfolio = set()
         if 'positions' in portfolio:
             for pos in portfolio['positions']:
-                symbol = pos.get('symbol', '')
+                instrument = pos.get('instrument', {})
+                symbol = instrument.get('symbol', '')
+                # Check if it's a stock (not an option)
+                if not re.match(r'[A-Z]+2\d{2}\d{3}[CP]\d{8}', symbol):
+                    stock_symbols_in_portfolio.add(symbol)
+
+        if 'positions' in portfolio:
+            for pos in portfolio['positions']:
+                instrument = pos.get('instrument', {})
+                symbol = instrument.get('symbol', '')
                 # Check each option trade against portfolio
                 for key, data in option_trades.items():
                     for tx in data['transactions']:
@@ -157,6 +168,18 @@ def calculate_pl_from_history():
                         if tx_match and tx_match.group(1) == symbol:
                             data['any_in_portfolio'] = True
                             break
+
+        # Check for sell-only options that might have been assigned to stock
+        for key, data in option_trades.items():
+            has_buy = data['buy'] != 0
+            has_sell = data['sell'] != 0
+
+            # If it's sell-only and the underlying stock is in portfolio, it was likely assigned
+            if has_sell and not has_buy:
+                # Extract underlying symbol from key
+                underlying = key.split('_')[0] if '_' in key else key[:key.index('2')]
+                if underlying in stock_symbols_in_portfolio:
+                    data['any_in_portfolio'] = True  # Mark as "open" since stock position is open
 
         # Calculate options P&L
         options_pl = 0
@@ -171,15 +194,15 @@ def calculate_pl_from_history():
 
             # Count as CLOSED if:
             # 1. Both buy and sell in YTD, OR
-            # 2. Only buy or only sell BUT NOT in portfolio (closed via expiry/assignment)
+            # 2. Only buy or only sell BUT NOT in portfolio AND not assigned to stock
             if not is_in_portfolio:
-                # Position is closed (both sides in YTD, or expired/assigned)
+                # Position is closed (both sides in YTD, or expired/assignment)
                 options_pl += data['buy'] + data['sell']
                 completed_transactions.extend(data['transactions'])
                 if has_buy or has_sell:
                     closed_option_positions += 1
             else:
-                # Still open in portfolio
+                # Still open in portfolio (or assigned to stock that's still open)
                 open_option_positions += 1
 
         # Calculate stock P&L using FIFO matching
@@ -326,7 +349,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '2.7 (Closed in YTD + Portfolio Check)'
+        'version': '2.8 (Assignment handling - exclude options assigned to open stock)'
     })
 
 @app.route('/api/debug/all_positions')
