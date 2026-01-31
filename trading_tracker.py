@@ -307,6 +307,55 @@ def reset():
     _cache_time = None
     return jsonify({'status': 'reset'})
 
+@app.route('/api/debug/history')
+def debug_history():
+    """Debug endpoint to see full transaction history from Public API"""
+    try:
+        token = get_access_token()
+        account_id = get_account_id(token)
+
+        now = datetime.now()
+        year_start = datetime(now.year, 1, 1).strftime('%Y-%m-%dT%H:%M:%SZ')
+        end_date = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        history = fetch_order_history(token, account_id, year_start, end_date)
+        transactions = history.get('transactions', [])
+
+        # Group by transaction type to see all available types
+        by_type = {}
+        for tx in transactions:
+            tx_type = tx.get('type', 'UNKNOWN')
+            sub_type = tx.get('subType', 'UNKNOWN')
+            key = f"{tx_type}/{sub_type}"
+
+            if key not in by_type:
+                by_type[key] = []
+
+            # Store a sample of each type
+            if len(by_type[key]) < 5:
+                by_type[key].append({
+                    'id': tx.get('id'),
+                    'description': tx.get('description'),
+                    'type': tx_type,
+                    'subType': sub_type,
+                    'amount': tx.get('amount'),
+                    'netAmount': tx.get('netAmount'),
+                    'principalAmount': tx.get('principalAmount'),
+                    'quantity': tx.get('quantity'),
+                    'symbol': tx.get('symbol'),
+                    'timestamp': tx.get('timestamp'),
+                    'all_fields': list(tx.keys())
+                })
+
+        return jsonify({
+            'total_transactions': len(transactions),
+            'types_found': list(by_type.keys()),
+            'samples_by_type': by_type
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
 @app.route('/api/health')
 def health():
     """Health check endpoint"""
