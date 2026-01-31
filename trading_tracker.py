@@ -1052,6 +1052,87 @@ def debug_transactions():
         import traceback
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
 
+@app.route('/api/debug/simple-pl')
+def debug_simple_pl():
+    """Calculate P&L by simply summing netAmount per option symbol (no FIFO matching)"""
+    try:
+        token = get_access_token()
+        account_id = get_account_id(token)
+
+        now = datetime.now()
+        year_start = datetime(now.year, 1, 1).strftime('%Y-%m-%dT%H:%M:%SZ')
+        end_date = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        history = fetch_order_history(token, account_id, year_start, end_date)
+        transactions = history.get('transactions', [])
+
+        # Get current portfolio to determine open positions
+        portfolio_data = fetch_portfolio(token, account_id)
+        portfolio_positions = portfolio_data.get('positions', [])
+
+        # Extract symbols from portfolio
+        portfolio_symbols = set()
+        for pos in portfolio_positions:
+            symbol = pos.get('instrument', {}).get('symbol', '')
+            if symbol:
+                # Strip -OPTION suffix
+                clean_symbol = symbol.replace('-OPTION', '')
+                portfolio_symbols.add(clean_symbol)
+
+        # Group by option symbol and sum netAmount
+        import re
+        by_symbol = {}
+
+        for tx in transactions:
+            if tx.get('type') == 'TRADE' and tx.get('subType') == 'TRADE':
+                description = tx.get('description', '')
+                # Parse option symbol
+                match = re.search(r'([A-Z]+\d{6}[CP]\d{8})', description)
+                if match:
+                    opt_symbol = match.group(1)
+                    net = float(tx.get('netAmount') or 0)
+
+                    if opt_symbol not in by_symbol:
+                        by_symbol[opt_symbol] = {'net': 0, 'txs': 0, 'underlying': None}
+                    by_symbol[opt_symbol]['net'] += net
+                    by_symbol[opt_symbol]['txs'] += 1
+                    # Extract underlying
+                    underlying_match = re.match(r'([A-Z]+)', opt_symbol)
+                    if underlying_match:
+                        by_symbol[opt_symbol]['underlying'] = underlying_match.group(1)
+
+        # Calculate realized (closed) and unrealized (open) P&L
+        realized_pl = 0
+        unrealized_pl = 0
+        closed_symbols = []
+        open_symbols = []
+
+        for symbol, data in sorted(by_symbol.items()):
+            symbol_pl = data['net']
+            underlying = data['underlying']
+            is_open = underlying in portfolio_symbols if underlying else False
+
+            if is_open:
+                unrealized_pl += symbol_pl
+                open_symbols.append({'symbol': symbol, 'pl': symbol_pl})
+            else:
+                realized_pl += symbol_pl
+                closed_symbols.append({'symbol': symbol, 'pl': symbol_pl})
+
+        return jsonify({
+            'method': 'Sum netAmount per symbol (no FIFO)',
+            'realized_pl': realized_pl,
+            'unrealized_pl': unrealized_pl,
+            'total_pl': realized_pl + unrealized_pl,
+            'closed_positions': closed_symbols,
+            'open_positions': open_symbols,
+            'target': 3693.32,
+            'difference': realized_pl - 3693.32
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
 if __name__ == '__main__':
     init_db()
     app.run(host='0.0.0.0', port=8080)
