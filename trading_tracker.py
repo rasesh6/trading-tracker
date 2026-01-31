@@ -972,6 +972,57 @@ def health():
         'db_initialized': _db_initialized
     })
 
+@app.route('/api/debug/transactions')
+def debug_transactions():
+    """Debug endpoint to show all transaction types from Public API"""
+    try:
+        token = get_access_token()
+        account_id = get_account_id(token)
+
+        now = datetime.now()
+        year_start = datetime(now.year, 1, 1).strftime('%Y-%m-%dT%H:%M:%SZ')
+        end_date = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        history = fetch_order_history(token, account_id, year_start, end_date)
+        transactions = history.get('transactions', [])
+
+        # Analyze all transaction types
+        type_counts = {}
+        subtypes_by_type = {}
+        examples = []
+
+        for tx in transactions:
+            tx_type = tx.get('type', 'UNKNOWN')
+            subtype = tx.get('subType', 'UNKNOWN')
+            description = tx.get('description', '')
+
+            type_counts[tx_type] = type_counts.get(tx_type, 0) + 1
+
+            if tx_type not in subtypes_by_type:
+                subtypes_by_type[tx_type] = {}
+            subtypes_by_type[tx_type][subtype] = subtypes_by_type[tx_type].get(subtype, 0) + 1
+
+            # Collect examples of each type
+            if len(examples) < 100:
+                examples.append({
+                    'type': tx_type,
+                    'subType': subtype,
+                    'description': description[:100],
+                    'quantity': tx.get('quantity'),
+                    'netAmount': tx.get('netAmount'),
+                    'principalAmount': tx.get('principalAmount')
+                })
+
+        return jsonify({
+            'total_transactions': len(transactions),
+            'type_counts': type_counts,
+            'subtypes_by_type': subtypes_by_type,
+            'examples': examples
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
 if __name__ == '__main__':
     init_db()
     app.run(host='0.0.0.0', port=8080)
