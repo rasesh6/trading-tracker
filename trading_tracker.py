@@ -52,7 +52,7 @@ def fetch_order_history(token, account_id, start_date, end_date):
     return response.json()
 
 def calculate_pl_from_history():
-    """Calculate P&L using FIFO matching for closed positions"""
+    """Calculate P&L using FIFO matching for stocks and Portfolio API check for options"""
     global _history_cache, _cache_time
 
     # Cache for 5 minutes
@@ -72,6 +72,22 @@ def calculate_pl_from_history():
         history = fetch_order_history(token, account_id, year_start, end_date)
         transactions = history.get('transactions', [])
 
+        # Fetch Portfolio API to check currently open positions
+        portfolio_response = get(
+            f'https://api.public.com/userapigateway/trading/{account_id}/portfolio',
+            headers={'Authorization': f'Bearer {token}'}
+        )
+        portfolio = portfolio_response.json()
+
+        # Extract currently open option positions from Portfolio
+        open_options_in_portfolio = set()
+        if 'positions' in portfolio:
+            for pos in portfolio['positions']:
+                symbol = pos.get('symbol', '')
+                # Option symbols have format like "NVDA260123P00175000"
+                if re.match(r'[A-Z]+2\d{2}\d{3}[CP]\d{8}', symbol):
+                    open_options_in_portfolio.add(symbol)
+
         # Separate options (exact contract matching) and stocks (FIFO matching)
         option_trades = {}  # contract -> {buy: total, sell: total, transactions: []}
         stock_trades = []   # list of {symbol, side, quantity, amount, timestamp}
@@ -87,8 +103,8 @@ def calculate_pl_from_history():
             description = tx.get('description', '')
             timestamp = tx.get('timestamp', '')
 
-            # Check if it's an option (2026 expiry: 260XXX)
-            match = re.search(r'([A-Z]+260\d{3}[CP]\d{8})', description)
+            # Check if it's an option (any 20XX expiry)
+            match = re.search(r'([A-Z]+2\d{2}\d{3}[CP]\d{8})', description)
             if match:
                 # Option trade - exact contract matching
                 contract = match.group(1)
@@ -107,7 +123,6 @@ def calculate_pl_from_history():
                 })
             else:
                 # Stock trade - extract symbol and quantity
-                # "BUY 100 NVDA at 179.00" -> symbol: NVDA, qty: 100
                 parts = description.split()
                 if len(parts) >= 3:
                     side = 'BUY' if 'BUY' in description else 'SELL'
@@ -122,25 +137,34 @@ def calculate_pl_from_history():
                         'description': description
                     })
 
-        # Calculate options P&L (exact contract matching - both buy and sell required)
+        # Calculate options P&L
         options_pl = 0
         completed_transactions = []
         closed_option_positions = 0
         open_option_positions = 0
 
         for contract, data in option_trades.items():
-            if data['buy'] != 0 and data['sell'] != 0:
+            has_buy = data['buy'] != 0
+            has_sell = data['sell'] != 0
+            is_in_portfolio = contract in open_options_in_portfolio
+
+            # Closed positions: have both buy and sell
+            if has_buy and has_sell:
                 options_pl += data['buy'] + data['sell']
                 completed_transactions.extend(data['transactions'])
                 closed_option_positions += 1
+            # Sell-only not in portfolio: likely expired worthless (profit = premium received)
+            elif has_sell and not has_buy and not is_in_portfolio:
+                options_pl += data['sell']  # Full premium is profit
+                completed_transactions.extend(data['transactions'])
+                closed_option_positions += 1
+            # Buy-only or sell-only in portfolio: still open
             else:
                 open_option_positions += 1
 
         # Calculate stock P&L using FIFO matching
-        # Sort by timestamp and match buys with sells
         stock_trades.sort(key=lambda x: x['timestamp'])
 
-        # Group by symbol and track open positions
         stock_positions = {}  # symbol -> queue of open buy trades
         stocks_pl = 0
         closed_stock_positions = 0
@@ -152,7 +176,6 @@ def calculate_pl_from_history():
                 stock_positions[symbol] = []
 
             if trade['side'] == 'BUY':
-                # Add to open positions queue
                 stock_positions[symbol].append({
                     'quantity': trade['quantity'],
                     'amount': trade['amount'],
@@ -160,7 +183,6 @@ def calculate_pl_from_history():
                     'timestamp': trade['timestamp']
                 })
             else:  # SELL
-                # Match with FIFO buys
                 remaining_qty = trade['quantity']
                 sell_amount_per_share = abs(trade['amount'] / trade['quantity'])
 
@@ -170,32 +192,27 @@ def calculate_pl_from_history():
                     match_qty = min(remaining_qty, buy_trade['quantity'])
                     buy_amount_per_share = abs(buy_trade['amount'] / buy_trade['quantity'])
 
-                    # Calculate P&L for this match
                     match_pl = (sell_amount_per_share - buy_amount_per_share) * match_qty
                     stocks_pl += match_pl
 
                     completed_transactions.append(buy_trade)
                     completed_transactions.append(trade)
 
-                    # Update quantities
                     remaining_qty -= match_qty
                     buy_trade['quantity'] -= match_qty
 
-                    # Remove fully matched buy from queue
                     if buy_trade['quantity'] == 0:
                         stock_positions[symbol].pop(0)
                         closed_stock_positions += 1
 
                 if remaining_qty > 0:
-                    # Unmatched sell (short position opened)
                     stock_positions[symbol].append({
                         'quantity': remaining_qty,
-                        'amount': 0,  # Will be matched when buy-to-close happens
+                        'amount': 0,
                         'description': f"SHORT {remaining_qty} {symbol}",
                         'timestamp': trade['timestamp']
                     })
 
-        # Count remaining open positions
         for symbol, queue in stock_positions.items():
             open_stock_positions += len(queue)
 
@@ -294,7 +311,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '2.3 (FIFO Stock Matching)'
+        'version': '2.4 (Portfolio Check + Expired Options)'
     })
 
 @app.route('/api/debug/all_positions')
