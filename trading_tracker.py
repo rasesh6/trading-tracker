@@ -1112,16 +1112,30 @@ def debug_simple_pl():
         unrealized_pl = 0
         closed_symbols = []
         open_symbols = []
+        assigned_symbols = []  # Track assigned options separately
 
         for symbol, data in sorted(by_symbol.items()):
             symbol_pl = data['net']
-            # Position is open if the option symbol is still in the portfolio
-            is_open = symbol in portfolio_option_symbols
+            underlying = data['underlying']
 
-            if is_open:
+            # Check if this option was assigned (not in portfolio as option, but underlying stock is held)
+            # For assigned puts: the premium received is NOT profit, it reduces stock cost basis
+            was_assigned = (
+                symbol not in portfolio_option_symbols and  # Option not in portfolio
+                underlying in portfolio_stock_symbols and  # But underlying stock IS in portfolio
+                'P' in symbol  # Only applies to PUTs
+            )
+
+            if symbol in portfolio_option_symbols:
+                # Still open as option
                 unrealized_pl += symbol_pl
                 open_symbols.append({'symbol': symbol, 'pl': symbol_pl})
+            elif was_assigned:
+                # Assigned - do NOT count premium as profit
+                # The premium reduced the stock's cost basis
+                assigned_symbols.append({'symbol': symbol, 'pl': symbol_pl, 'note': 'Assigned - premium reduces stock cost basis'})
             else:
+                # Closed (expired or sold)
                 realized_pl += symbol_pl
                 closed_symbols.append({'symbol': symbol, 'pl': symbol_pl})
 
@@ -1150,16 +1164,21 @@ def debug_simple_pl():
         stock_realized_pl = sum(pl for symbol, pl in stock_by_symbol.items() if symbol not in portfolio_stock_symbols)
         options_realized_pl = realized_pl - stock_realized_pl
 
+        # Calculate assigned options total (excluded from realized)
+        assigned_total = sum(s['pl'] for s in assigned_symbols)
+
         return jsonify({
             'method': 'Sum netAmount per symbol (no FIFO)',
             'options_realized_pl': options_realized_pl,
             'options_unrealized_pl': unrealized_pl,
             'stock_realized_pl': stock_realized_pl,
+            'assigned_pl': assigned_total,
             'realized_pl': realized_pl,
             'unrealized_pl': unrealized_pl,
             'total_pl': realized_pl + unrealized_pl,
             'closed_positions': closed_symbols,
             'open_positions': open_symbols,
+            'assigned_positions': assigned_symbols,
             'portfolio_option_symbols': list(portfolio_option_symbols),
             'portfolio_stock_symbols': list(portfolio_stock_symbols),
             'target': 3693.32,
