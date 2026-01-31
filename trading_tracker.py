@@ -52,7 +52,7 @@ def fetch_order_history(token, account_id, start_date, end_date):
     return response.json()
 
 def calculate_pl_from_history():
-    """Calculate P&L - only count positions with BOTH buy and sell in YTD"""
+    """Calculate P&L - count all positions CLOSED in YTD (check Portfolio to exclude open)"""
     global _history_cache, _cache_time
 
     # Cache for 5 minutes
@@ -71,6 +71,21 @@ def calculate_pl_from_history():
 
         history = fetch_order_history(token, account_id, year_start, end_date)
         transactions = history.get('transactions', [])
+
+        # Fetch Portfolio API to identify currently OPEN positions
+        portfolio_response = get(
+            f'https://api.public.com/userapigateway/trading/{account_id}/portfolio',
+            headers={'Authorization': f'Bearer {token}'}
+        )
+        portfolio = portfolio_response.json()
+
+        # Extract currently open option positions from Portfolio
+        open_in_portfolio = set()
+        if 'positions' in portfolio:
+            for pos in portfolio['positions']:
+                symbol = pos.get('symbol', '')
+                if re.match(r'[A-Z]+2\d{2}\d{3}[CP]\d{8}', symbol):
+                    open_in_portfolio.add(symbol)
 
         # Separate options (group by underlying/expiry) and stocks (FIFO)
         option_trades = {}
@@ -98,7 +113,7 @@ def calculate_pl_from_history():
                     key = contract
 
                 if key not in option_trades:
-                    option_trades[key] = {'buy': 0, 'sell': 0, 'transactions': []}
+                    option_trades[key] = {'buy': 0, 'sell': 0, 'transactions': [], 'any_in_portfolio': False}
 
                 if 'BUY' in description:
                     option_trades[key]['buy'] += net_amount
@@ -125,20 +140,46 @@ def calculate_pl_from_history():
                         'description': description
                     })
 
-        # Calculate options P&L - ONLY count groups with BOTH buy and sell
+        # Check which option groups have any contract still in portfolio
+        for key, data in option_trades.items():
+            # Check if any contract in this group is in portfolio
+            data['any_in_portfolio'] = False
+
+        # Re-check portfolio more carefully - extract full option contracts
+        if 'positions' in portfolio:
+            for pos in portfolio['positions']:
+                symbol = pos.get('symbol', '')
+                # Check each option trade against portfolio
+                for key, data in option_trades.items():
+                    for tx in data['transactions']:
+                        # Extract contract from transaction description
+                        tx_match = re.search(r'([A-Z]+2\d{2}\d{3}[CP]\d{8})', tx['description'])
+                        if tx_match and tx_match.group(1) == symbol:
+                            data['any_in_portfolio'] = True
+                            break
+
+        # Calculate options P&L
         options_pl = 0
         completed_transactions = []
         closed_option_positions = 0
         open_option_positions = 0
 
         for key, data in option_trades.items():
-            if data['buy'] != 0 and data['sell'] != 0:
-                # Closed spread/position
+            has_buy = data['buy'] != 0
+            has_sell = data['sell'] != 0
+            is_in_portfolio = data['any_in_portfolio']
+
+            # Count as CLOSED if:
+            # 1. Both buy and sell in YTD, OR
+            # 2. Only buy or only sell BUT NOT in portfolio (closed via expiry/assignment)
+            if not is_in_portfolio:
+                # Position is closed (both sides in YTD, or expired/assigned)
                 options_pl += data['buy'] + data['sell']
                 completed_transactions.extend(data['transactions'])
-                closed_option_positions += 1
+                if has_buy or has_sell:
+                    closed_option_positions += 1
             else:
-                # Open position (only buy or only sell in YTD)
+                # Still open in portfolio
                 open_option_positions += 1
 
         # Calculate stock P&L using FIFO matching
@@ -285,7 +326,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '2.6 (Clean: Closed Only)'
+        'version': '2.7 (Closed in YTD + Portfolio Check)'
     })
 
 @app.route('/api/debug/all_positions')
