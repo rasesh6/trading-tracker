@@ -130,7 +130,11 @@ def identify_spread_type(legs):
         long_calls = [l for l in calls if l['side'] == 'BUY']
         short_calls = [l for l in calls if l['side'] == 'SELL']
         if long_calls and short_calls:
-            if long_calls[0]['strike'] < short_calls[0]['strike']:
+            # Check if strikes are different - same strike means opening/closing, not a spread
+            if long_calls[0]['strike'] == short_calls[0]['strike']:
+                print(f"  DEBUG: 2 calls with same strike {long_calls[0]['strike']} - likely opening/closing, not a spread")
+                return "Unknown Spread"
+            elif long_calls[0]['strike'] < short_calls[0]['strike']:
                 return "Bull Call Spread (Debit)"
             else:
                 return "Bear Call Spread (Credit)"
@@ -142,7 +146,11 @@ def identify_spread_type(legs):
         long_puts = [l for l in puts if l['side'] == 'BUY']
         short_puts = [l for l in puts if l['side'] == 'SELL']
         if long_puts and short_puts:
-            if long_puts[0]['strike'] > short_puts[0]['strike']:
+            # Check if strikes are different - same strike means opening/closing, not a spread
+            if long_puts[0]['strike'] == short_puts[0]['strike']:
+                print(f"  DEBUG: 2 puts with same strike {long_puts[0]['strike']} - likely opening/closing, not a spread")
+                return "Unknown Spread"
+            elif long_puts[0]['strike'] > short_puts[0]['strike']:
                 return "Bear Put Spread (Debit)"
             else:
                 return "Bull Put Spread (Credit)"
@@ -239,10 +247,31 @@ def group_trades_into_spreads(trades):
                         processed.add(leg['transaction_id'])
                 else:
                     # Unknown spread type - treat as single legs
+                    # But if it's 2 legs with same strike (BUY + SELL), only add the opening leg (earlier timestamp)
+                    # The closing leg will be matched during FIFO processing
                     print(f"  Group of {len(group)} legs with unknown type, treating as single legs")
-                    for leg in group:
-                        single_legs.append(leg)
-                        processed.add(leg['transaction_id'])
+                    if len(group) == 2:
+                        # Check if they're opposite sides (opening + closing)
+                        sides = set(l['side'] for l in group)
+                        if len(sides) == 2:  # One BUY, one SELL
+                            # Only add the earlier transaction as the opening leg
+                            group.sort(key=lambda x: x['datetime'])
+                            opening_leg = group[0]
+                            closing_leg = group[1]
+                            print(f"    Same-strike group - only adding opening leg: {opening_leg['side']} {opening_leg['symbol']} at {opening_leg['datetime']}")
+                            print(f"    Closing leg will be matched during FIFO: {closing_leg['side']} {closing_leg['symbol']} at {closing_leg['datetime']}")
+                            single_legs.append(opening_leg)
+                            processed.add(opening_leg['transaction_id'])
+                            processed.add(closing_leg['transaction_id'])  # Mark closing as processed so it's not added again
+                        else:
+                            # Same side (e.g., both BUY) - add both as separate positions
+                            for leg in group:
+                                single_legs.append(leg)
+                                processed.add(leg['transaction_id'])
+                    else:
+                        for leg in group:
+                            single_legs.append(leg)
+                            processed.add(leg['transaction_id'])
             else:
                 # Not exactly 2 legs (could be 1, 3, 4, etc.) - treat each as single leg
                 if len(group) > 2:
