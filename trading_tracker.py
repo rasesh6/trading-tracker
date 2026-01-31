@@ -1070,14 +1070,20 @@ def debug_simple_pl():
         portfolio_data = fetch_portfolio(token, account_id)
         portfolio_positions = portfolio_data.get('positions', [])
 
-        # Extract symbols from portfolio
-        portfolio_symbols = set()
+        # Extract option symbols from portfolio (only option positions)
+        portfolio_option_symbols = set()
+        portfolio_stock_symbols = set()
+
         for pos in portfolio_positions:
             symbol = pos.get('instrument', {}).get('symbol', '')
             if symbol:
-                # Strip -OPTION suffix
-                clean_symbol = symbol.replace('-OPTION', '')
-                portfolio_symbols.add(clean_symbol)
+                if '-OPTION' in symbol:
+                    # Option position - strip -OPTION suffix
+                    clean_symbol = symbol.replace('-OPTION', '')
+                    portfolio_option_symbols.add(clean_symbol)
+                else:
+                    # Stock position
+                    portfolio_stock_symbols.add(symbol)
 
         # Group by option symbol and sum netAmount
         import re
@@ -1101,7 +1107,7 @@ def debug_simple_pl():
                     if underlying_match:
                         by_symbol[opt_symbol]['underlying'] = underlying_match.group(1)
 
-        # Calculate realized (closed) and unrealized (open) P&L
+        # Calculate realized (closed) and unrealized (open) P&L for options
         realized_pl = 0
         unrealized_pl = 0
         closed_symbols = []
@@ -1109,8 +1115,8 @@ def debug_simple_pl():
 
         for symbol, data in sorted(by_symbol.items()):
             symbol_pl = data['net']
-            underlying = data['underlying']
-            is_open = underlying in portfolio_symbols if underlying else False
+            # Position is open if the option symbol is still in the portfolio
+            is_open = symbol in portfolio_option_symbols
 
             if is_open:
                 unrealized_pl += symbol_pl
@@ -1119,13 +1125,43 @@ def debug_simple_pl():
                 realized_pl += symbol_pl
                 closed_symbols.append({'symbol': symbol, 'pl': symbol_pl})
 
+        # Also calculate stock P&L (closed stock trades)
+        stock_by_symbol = {}
+        for tx in transactions:
+            if tx.get('type') == 'TRADE' and tx.get('subType') == 'TRADE':
+                description = tx.get('description', '')
+                # Check if it's NOT an option (stock trade)
+                if not re.search(r'([A-Z]+\d{6}[CP]\d{8})', description) and ('BUY' in description or 'SELL' in description):
+                    parts = description.split()
+                    if len(parts) >= 3:
+                        stock_symbol = parts[2]
+                        net = float(tx.get('netAmount') or 0)
+
+                        if stock_symbol not in stock_by_symbol:
+                            stock_by_symbol[stock_symbol] = 0
+                        stock_by_symbol[stock_symbol] += net
+
+        # Stock trades for symbols not currently held are realized
+        for stock_symbol, pl in stock_by_symbol.items():
+            if stock_symbol not in portfolio_stock_symbols:
+                realized_pl += pl
+
+        # Calculate separate P&L components
+        stock_realized_pl = sum(pl for symbol, pl in stock_by_symbol.items() if symbol not in portfolio_stock_symbols)
+        options_realized_pl = realized_pl - stock_realized_pl
+
         return jsonify({
             'method': 'Sum netAmount per symbol (no FIFO)',
+            'options_realized_pl': options_realized_pl,
+            'options_unrealized_pl': unrealized_pl,
+            'stock_realized_pl': stock_realized_pl,
             'realized_pl': realized_pl,
             'unrealized_pl': unrealized_pl,
             'total_pl': realized_pl + unrealized_pl,
             'closed_positions': closed_symbols,
             'open_positions': open_symbols,
+            'portfolio_option_symbols': list(portfolio_option_symbols),
+            'portfolio_stock_symbols': list(portfolio_stock_symbols),
             'target': 3693.32,
             'difference': realized_pl - 3693.32
         })
