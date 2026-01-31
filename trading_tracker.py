@@ -52,7 +52,7 @@ def fetch_order_history(token, account_id, start_date, end_date):
     return response.json()
 
 def calculate_pl_from_history():
-    """Calculate P&L using FIFO matching for stocks and Portfolio API check for options"""
+    """Calculate P&L - only count positions with BOTH buy and sell in YTD"""
     global _history_cache, _cache_time
 
     # Cache for 5 minutes
@@ -72,22 +72,7 @@ def calculate_pl_from_history():
         history = fetch_order_history(token, account_id, year_start, end_date)
         transactions = history.get('transactions', [])
 
-        # Fetch Portfolio API to check currently open positions
-        portfolio_response = get(
-            f'https://api.public.com/userapigateway/trading/{account_id}/portfolio',
-            headers={'Authorization': f'Bearer {token}'}
-        )
-        portfolio = portfolio_response.json()
-
-        # Extract currently open option positions from Portfolio
-        open_options_in_portfolio = set()
-        if 'positions' in portfolio:
-            for pos in portfolio['positions']:
-                symbol = pos.get('symbol', '')
-                if re.match(r'[A-Z]+2\d{2}\d{3}[CP]\d{8}', symbol):
-                    open_options_in_portfolio.add(symbol)
-
-        # Separate options and stocks
+        # Separate options (group by underlying/expiry) and stocks (FIFO)
         option_trades = {}
         stock_trades = []
 
@@ -105,13 +90,22 @@ def calculate_pl_from_history():
             match = re.search(r'([A-Z]+2\d{2}\d{3}[CP]\d{8})', description)
             if match:
                 contract = match.group(1)
-                if contract not in option_trades:
-                    option_trades[contract] = {'buy': 0, 'sell': 0, 'transactions': []}
-                if 'BUY' in description:
-                    option_trades[contract]['buy'] += net_amount
+                # Extract underlying and expiry for grouping
+                m2 = re.match(r'([A-Z]+)(\d{6})([CP])(\d{8})', contract)
+                if m2:
+                    key = f"{m2.group(1)}_{m2.group(2)}"  # underlying_expiry
                 else:
-                    option_trades[contract]['sell'] += net_amount
-                option_trades[contract]['transactions'].append({
+                    key = contract
+
+                if key not in option_trades:
+                    option_trades[key] = {'buy': 0, 'sell': 0, 'transactions': []}
+
+                if 'BUY' in description:
+                    option_trades[key]['buy'] += net_amount
+                else:
+                    option_trades[key]['sell'] += net_amount
+
+                option_trades[key]['transactions'].append({
                     'description': description,
                     'netAmount': net_amount,
                     'timestamp': timestamp
@@ -131,53 +125,21 @@ def calculate_pl_from_history():
                         'description': description
                     })
 
-        # Calculate options P&L - group by underlying to match spreads
-        # First, separate contracts by underlying and expiry
-        options_by_underlying = {}
-        for contract, data in option_trades.items():
-            # Extract underlying and expiry from contract like "NVDA260123P00175000"
-            match = re.match(r'([A-Z]+)(\d{6})([CP])(\d{8})', contract)
-            if match:
-                underlying = match.group(1)
-                expiry = match.group(2)
-                opt_type = match.group(3)
-                key = f"{underlying}_{expiry}"
-                if key not in options_by_underlying:
-                    options_by_underlying[key] = []
-                options_by_underlying[key].append({
-                    'contract': contract,
-                    'buy': data['buy'],
-                    'sell': data['sell'],
-                    'transactions': data['transactions']
-                })
-
+        # Calculate options P&L - ONLY count groups with BOTH buy and sell
         options_pl = 0
         completed_transactions = []
         closed_option_positions = 0
         open_option_positions = 0
 
-        # Process each underlying/expiry group
-        for key, contracts in options_by_underlying.items():
-            group_buy_total = sum(c['buy'] for c in contracts)
-            group_sell_total = sum(c['sell'] for c in contracts)
-
-            # Check if any contract in this group is in portfolio (still open)
-            any_in_portfolio = any(c['contract'] in open_options_in_portfolio for c in contracts)
-
-            # If both buy and sell exist in this group, it's a closed spread
-            if group_buy_total != 0 and group_sell_total != 0:
-                options_pl += group_buy_total + group_sell_total
-                for c in contracts:
-                    completed_transactions.extend(c['transactions'])
-                closed_option_positions += len(contracts)
-            # Sell-only not in portfolio: expired worthless
-            elif group_sell_total != 0 and group_buy_total == 0 and not any_in_portfolio:
-                options_pl += group_sell_total
-                for c in contracts:
-                    completed_transactions.extend(c['transactions'])
-                closed_option_positions += len(contracts)
+        for key, data in option_trades.items():
+            if data['buy'] != 0 and data['sell'] != 0:
+                # Closed spread/position
+                options_pl += data['buy'] + data['sell']
+                completed_transactions.extend(data['transactions'])
+                closed_option_positions += 1
             else:
-                open_option_positions += len(contracts)
+                # Open position (only buy or only sell in YTD)
+                open_option_positions += 1
 
         # Calculate stock P&L using FIFO matching
         stock_trades.sort(key=lambda x: x['timestamp'])
@@ -323,7 +285,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '2.5 (Spread Grouping)'
+        'version': '2.6 (Clean: Closed Only)'
     })
 
 @app.route('/api/debug/all_positions')
