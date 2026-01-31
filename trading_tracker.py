@@ -84,13 +84,12 @@ def calculate_pl_from_history():
         if 'positions' in portfolio:
             for pos in portfolio['positions']:
                 symbol = pos.get('symbol', '')
-                # Option symbols have format like "NVDA260123P00175000"
                 if re.match(r'[A-Z]+2\d{2}\d{3}[CP]\d{8}', symbol):
                     open_options_in_portfolio.add(symbol)
 
-        # Separate options (exact contract matching) and stocks (FIFO matching)
-        option_trades = {}  # contract -> {buy: total, sell: total, transactions: []}
-        stock_trades = []   # list of {symbol, side, quantity, amount, timestamp}
+        # Separate options and stocks
+        option_trades = {}
+        stock_trades = []
 
         for tx in transactions:
             tx_type = tx.get('type', '')
@@ -103,26 +102,21 @@ def calculate_pl_from_history():
             description = tx.get('description', '')
             timestamp = tx.get('timestamp', '')
 
-            # Check if it's an option (any 20XX expiry)
             match = re.search(r'([A-Z]+2\d{2}\d{3}[CP]\d{8})', description)
             if match:
-                # Option trade - exact contract matching
                 contract = match.group(1)
                 if contract not in option_trades:
                     option_trades[contract] = {'buy': 0, 'sell': 0, 'transactions': []}
-
                 if 'BUY' in description:
                     option_trades[contract]['buy'] += net_amount
                 else:
                     option_trades[contract]['sell'] += net_amount
-
                 option_trades[contract]['transactions'].append({
                     'description': description,
                     'netAmount': net_amount,
                     'timestamp': timestamp
                 })
             else:
-                # Stock trade - extract symbol and quantity
                 parts = description.split()
                 if len(parts) >= 3:
                     side = 'BUY' if 'BUY' in description else 'SELL'
@@ -137,35 +131,57 @@ def calculate_pl_from_history():
                         'description': description
                     })
 
-        # Calculate options P&L
+        # Calculate options P&L - group by underlying to match spreads
+        # First, separate contracts by underlying and expiry
+        options_by_underlying = {}
+        for contract, data in option_trades.items():
+            # Extract underlying and expiry from contract like "NVDA260123P00175000"
+            match = re.match(r'([A-Z]+)(\d{6})([CP])(\d{8})', contract)
+            if match:
+                underlying = match.group(1)
+                expiry = match.group(2)
+                opt_type = match.group(3)
+                key = f"{underlying}_{expiry}"
+                if key not in options_by_underlying:
+                    options_by_underlying[key] = []
+                options_by_underlying[key].append({
+                    'contract': contract,
+                    'buy': data['buy'],
+                    'sell': data['sell'],
+                    'transactions': data['transactions']
+                })
+
         options_pl = 0
         completed_transactions = []
         closed_option_positions = 0
         open_option_positions = 0
 
-        for contract, data in option_trades.items():
-            has_buy = data['buy'] != 0
-            has_sell = data['sell'] != 0
-            is_in_portfolio = contract in open_options_in_portfolio
+        # Process each underlying/expiry group
+        for key, contracts in options_by_underlying.items():
+            group_buy_total = sum(c['buy'] for c in contracts)
+            group_sell_total = sum(c['sell'] for c in contracts)
 
-            # Closed positions: have both buy and sell
-            if has_buy and has_sell:
-                options_pl += data['buy'] + data['sell']
-                completed_transactions.extend(data['transactions'])
-                closed_option_positions += 1
-            # Sell-only not in portfolio: likely expired worthless (profit = premium received)
-            elif has_sell and not has_buy and not is_in_portfolio:
-                options_pl += data['sell']  # Full premium is profit
-                completed_transactions.extend(data['transactions'])
-                closed_option_positions += 1
-            # Buy-only or sell-only in portfolio: still open
+            # Check if any contract in this group is in portfolio (still open)
+            any_in_portfolio = any(c['contract'] in open_options_in_portfolio for c in contracts)
+
+            # If both buy and sell exist in this group, it's a closed spread
+            if group_buy_total != 0 and group_sell_total != 0:
+                options_pl += group_buy_total + group_sell_total
+                for c in contracts:
+                    completed_transactions.extend(c['transactions'])
+                closed_option_positions += len(contracts)
+            # Sell-only not in portfolio: expired worthless
+            elif group_sell_total != 0 and group_buy_total == 0 and not any_in_portfolio:
+                options_pl += group_sell_total
+                for c in contracts:
+                    completed_transactions.extend(c['transactions'])
+                closed_option_positions += len(contracts)
             else:
-                open_option_positions += 1
+                open_option_positions += len(contracts)
 
         # Calculate stock P&L using FIFO matching
         stock_trades.sort(key=lambda x: x['timestamp'])
-
-        stock_positions = {}  # symbol -> queue of open buy trades
+        stock_positions = {}
         stocks_pl = 0
         closed_stock_positions = 0
         open_stock_positions = 0
@@ -182,22 +198,18 @@ def calculate_pl_from_history():
                     'description': trade['description'],
                     'timestamp': trade['timestamp']
                 })
-            else:  # SELL
+            else:
                 remaining_qty = trade['quantity']
                 sell_amount_per_share = abs(trade['amount'] / trade['quantity'])
 
                 while remaining_qty > 0 and stock_positions[symbol]:
                     buy_trade = stock_positions[symbol][0]
-
                     match_qty = min(remaining_qty, buy_trade['quantity'])
                     buy_amount_per_share = abs(buy_trade['amount'] / buy_trade['quantity'])
-
                     match_pl = (sell_amount_per_share - buy_amount_per_share) * match_qty
                     stocks_pl += match_pl
-
                     completed_transactions.append(buy_trade)
                     completed_transactions.append(trade)
-
                     remaining_qty -= match_qty
                     buy_trade['quantity'] -= match_qty
 
@@ -311,7 +323,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '2.4 (Portfolio Check + Expired Options)'
+        'version': '2.5 (Spread Grouping)'
     })
 
 @app.route('/api/debug/all_positions')
