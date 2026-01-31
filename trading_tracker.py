@@ -398,8 +398,9 @@ def update_data():
                 # Strip -OPTION suffix to match trade symbols
                 clean_symbol = symbol.replace('-OPTION', '')
                 portfolio_symbols.add(clean_symbol)
+                print(f"  Portfolio position: {symbol} -> {clean_symbol}")
 
-        print(f"Portfolio has {len(portfolio_positions)} positions, symbols: {list(portfolio_symbols)}")
+        print(f"Portfolio has {len(portfolio_positions)} positions, {len(portfolio_symbols)} unique symbols: {sorted(portfolio_symbols)}")
 
         # Determine which spreads are open vs closed
         # A spread is open if any of its leg symbols are in the current portfolio
@@ -542,6 +543,9 @@ def update_data():
             # Check if this single leg is still open
             is_open = leg['symbol'] in portfolio_symbols
             status = 'open' if is_open else 'closed'
+
+            # Debug logging
+            print(f"  Single leg {leg['underlying']} {leg['opt_type']} @ ${leg['strike']} ({leg['side']}): symbol={leg['symbol']}, is_open={is_open}, in_portfolio={leg['symbol'] in portfolio_symbols}")
 
             # Calculate unrealized P&L for single leg
             unrealized_pl = 0
