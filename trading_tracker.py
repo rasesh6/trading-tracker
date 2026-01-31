@@ -356,6 +356,41 @@ def debug_history():
         import traceback
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
 
+@app.route('/api/debug/portfolio')
+def debug_portfolio():
+    """Debug endpoint to check Portfolio API for cost basis data"""
+    try:
+        token = get_access_token()
+        account_id = get_account_id(token)
+
+        portfolio_data = fetch_portfolio(token, account_id)
+        positions = portfolio_data.get('positions', [])
+
+        # Look for cost basis or realized gain fields
+        samples = []
+        for pos in positions[:10]:  # First 10 positions
+            samples.append({
+                'symbol': pos.get('instrument', {}).get('symbol'),
+                'quantity': pos.get('quantity'),
+                'all_fields': list(pos.keys()),
+                'instrument_fields': list(pos.get('instrument', {}).keys()) if pos.get('instrument') else [],
+                'has_costBasis': 'costBasis' in pos,
+                'has_realizedReturn': 'realizedReturn' in pos,
+                'costBasis': pos.get('costBasis'),
+                'realizedReturn': pos.get('realizedReturn'),
+                'currentValue': pos.get('currentValue'),
+                'averagePrice': pos.get('averagePrice'),
+                'currentPrice': pos.get('currentPrice')
+            })
+
+        return jsonify({
+            'total_positions': len(positions),
+            'samples': samples
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
 @app.route('/api/health')
 def health():
     """Health check endpoint"""
