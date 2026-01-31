@@ -535,7 +535,20 @@ def update_data():
         # Track which closing trades we've used globally to avoid double-matching
         global_used_closing_tx_ids = set()
 
+        # Get all symbols that are part of ANY spread (to avoid double-counting)
+        spread_symbols = set()
+        for spread in spreads:
+            for leg in spread['legs']:
+                spread_symbols.add(leg['symbol'])
+
+        print(f"DEBUG: Found {len(spread_symbols)} unique symbols in spreads: {sorted(spread_symbols)}")
+
         for leg in single_legs:
+            # Skip this leg if its symbol is part of any spread (already counted in spread P&L)
+            if leg['symbol'] in spread_symbols:
+                print(f"  Skipping {leg['underlying']} {leg['opt_type']} @ ${leg['strike']} - symbol is part of a spread")
+                continue
+
             leg_id = f"single_{leg['transaction_id']}"
             opt_type_name = 'CALL' if leg['opt_type'] == 'C' else 'PUT'
             leg_type = f"{leg['side']} {opt_type_name}"  # e.g., "BUY CALL" or "SELL PUT"
