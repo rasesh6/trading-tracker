@@ -1140,7 +1140,8 @@ def debug_simple_pl():
                 closed_symbols.append({'symbol': symbol, 'pl': symbol_pl})
 
         # Also calculate stock P&L (closed stock trades)
-        stock_by_symbol = {}
+        # Need to track quantities to determine which trades closed vs still open
+        stock_trades_by_symbol = {}
         for tx in transactions:
             if tx.get('type') == 'TRADE' and tx.get('subType') == 'TRADE':
                 description = tx.get('description', '')
@@ -1148,20 +1149,79 @@ def debug_simple_pl():
                 if not re.search(r'([A-Z]+\d{6}[CP]\d{8})', description) and ('BUY' in description or 'SELL' in description):
                     parts = description.split()
                     if len(parts) >= 3:
-                        stock_symbol = parts[2]
+                        action = parts[0]  # BUY or SELL
+                        qty = int(parts[1])  # quantity
+                        stock_symbol = parts[2]  # symbol
                         net = float(tx.get('netAmount') or 0)
 
-                        if stock_symbol not in stock_by_symbol:
-                            stock_by_symbol[stock_symbol] = 0
-                        stock_by_symbol[stock_symbol] += net
+                        if stock_symbol not in stock_trades_by_symbol:
+                            stock_trades_by_symbol[stock_symbol] = []
+                        stock_trades_by_symbol[stock_symbol].append({
+                            'action': action,
+                            'quantity': qty,
+                            'net': net
+                        })
 
-        # Stock trades for symbols not currently held are realized
-        for stock_symbol, pl in stock_by_symbol.items():
-            if stock_symbol not in portfolio_stock_symbols:
-                realized_pl += pl
+        # Process stock trades to calculate realized P&L
+        for stock_symbol, trades in stock_trades_by_symbol.items():
+            # Simple FIFO matching for stocks
+            buys = [t for t in trades if t['action'] == 'BUY']
+            sells = [t for t in trades if t['action'] == 'SELL']
+
+            remaining_qty = sum(b['quantity'] for b in buys) - sum(s['quantity'] for s in sells)
+            has_open_position = remaining_qty > 0
+
+            # Current holding status
+            is_currently_held = stock_symbol in portfolio_stock_symbols
+
+            # Calculate net P&L for closed portions
+            net_pl = sum(t['net'] for t in trades)
+
+            if is_currently_held and has_open_position:
+                # Still holding some shares - only count the closed portion
+                # For simplicity, count all trades if the current position matches what we expect
+                # (This is a rough approximation - proper FIFO would be more complex)
+                if remaining_qty > 0:
+                    # Some shares are still open, only count matched sells as closed
+                    # For now, count everything since we can't easily determine which closed
+                    pass
+
+            # If no longer held, all trades are realized
+            if not is_currently_held:
+                realized_pl += net_pl
+            elif has_open_position:
+                # Still holding some - need to separate closed from open
+                # For now, assume first sells closed first positions
+                closed_qty = min(sum(s['quantity'] for s in sells), sum(b['quantity'] for b in buys))
+                if closed_qty > 0 and closed_qty < sum(b['quantity'] for b in buys):
+                    # Partial close - estimate closed P&L proportionally
+                    total_bought = sum(b['quantity'] for b in buys)
+                    total_sold = sum(s['quantity'] for s in sells)
+                    if total_bought > 0:
+                        closed_ratio = total_sold / total_bought
+                        # Apply ratio to buys that were closed
+                        closed_pl = 0
+                        remaining_to_close = total_sold
+                        for buy in buys:
+                            buy_qty = buy['quantity']
+                            if remaining_to_close > 0:
+                                close_qty = min(buy_qty, remaining_to_close)
+                                # Pro-rate the buy cost
+                                closed_pl -= buy['net'] * (close_qty / buy_qty)
+                                remaining_to_close -= close_qty
+                        # All sells are closed
+                        closed_pl += sum(s['net'] for s in sells)
+                        realized_pl += closed_pl
 
         # Calculate separate P&L components
-        stock_realized_pl = sum(pl for symbol, pl in stock_by_symbol.items() if symbol not in portfolio_stock_symbols)
+        # Recalculate stock realized P&L from the trades we just processed
+        stock_realized_pl = 0
+        for stock_symbol, trades in stock_trades_by_symbol.items():
+            is_currently_held = stock_symbol in portfolio_stock_symbols
+            if not is_currently_held:
+                # All trades for this stock are closed
+                stock_realized_pl += sum(t['net'] for t in trades)
+
         options_realized_pl = realized_pl - stock_realized_pl
 
         # Calculate assigned options total (excluded from realized)
