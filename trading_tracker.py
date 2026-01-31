@@ -114,6 +114,33 @@ def expiry_to_iso(expiry_yymmdd):
     except:
         return None
 
+def get_options_rebate(underlying, quantity):
+    """
+    Calculate order rebate for options trades.
+    Public.com provides a rebate for each options order:
+    - $0.18 per contract for most equity/ETF options (NVDA, SOXL, CRM, FCX, GLD, SLV, NEM, etc.)
+    - $0.10 per contract for index options (QQQ, SPY, IWM, etc.)
+
+    Args:
+        underlying: Option underlying symbol (e.g., 'NVDA', 'QQQ')
+        quantity: Number of contracts (can be negative for short positions)
+
+    Returns:
+        Total rebate amount (positive value)
+    """
+    # Index options that get $0.10 rebate per contract
+    index_options = {'QQQ', 'SPY', 'IWM', 'DIA', 'VTI', 'VOO', 'GLD', 'SLV', 'TLT'}
+
+    # Determine rebate per contract
+    if underlying in index_options:
+        rebate_per_contract = 0.10
+    else:
+        # Most equity/ETF options get $0.18 rebate per contract
+        rebate_per_contract = 0.18
+
+    # Calculate total rebate (use absolute quantity since rebate is always positive)
+    return abs(quantity) * rebate_per_contract
+
 def identify_spread_type(legs):
     """Identify spread type from legs"""
     calls = [l for l in legs if l['opt_type'] == 'C']
@@ -470,7 +497,16 @@ def update_data():
                                 closed_date = ct['timestamp']
 
                 if realized_pl != 0 or exit_debit != 0:
-                    print(f"    CLOSED: Entry ${spread['entry_credit']:+.2f} → Exit ${exit_debit:+.2f} = P&L ${realized_pl:+.2f}")
+                    # Add rebates: each leg gets one rebate for opening, one for closing
+                    total_rebates = 0
+                    for leg in spread['legs']:
+                        # Rebate for opening order
+                        total_rebates += get_options_rebate(spread['underlying'], leg['quantity'])
+                        # Rebate for closing order (same quantity as opening)
+                        total_rebates += get_options_rebate(spread['underlying'], leg['quantity'])
+
+                    realized_pl += total_rebates
+                    print(f"    CLOSED: Entry ${spread['entry_credit']:+.2f} → Exit ${exit_debit:+.2f} + rebates ${total_rebates:.2f} = P&L ${realized_pl:+.2f}")
             else:
                 # Calculate unrealized P&L for open spreads using portfolio current values
                 # For credit spreads (positive entry): profit = entry - current_value_to_close
@@ -558,10 +594,14 @@ def update_data():
                         # Long option expired worthless = lose all premium
                         realized_pl = entry_amount  # already negative
 
+                    # Add rebate for the opening order
+                    rebate = get_options_rebate(leg['underlying'], leg['quantity'])
+                    realized_pl += rebate
+
                     # Set closed_date to expiration date
                     closed_date = expiry_to_iso(leg['expiry'])
 
-                    print(f"  {leg['underlying']} {leg['opt_type']} @ ${leg['strike']}: EXPIRED/ASSIGNED - P&L ${realized_pl:+.2f}, closed_date: {closed_date}")
+                    print(f"  {leg['underlying']} {leg['opt_type']} @ ${leg['strike']}: EXPIRED/ASSIGNED - P&L ${realized_pl:+.2f} (incl ${rebate:.2f} rebate), closed_date: {closed_date}")
                 else:
                     # Use FIFO matching (earliest trades first)
                     closing_trades_for_leg.sort(key=lambda x: x['timestamp'])
@@ -597,9 +637,20 @@ def update_data():
                         entry_amount = leg['total_amount']
                         # P&L = entry + exit
                         realized_pl = entry_amount + leg_exit
+
+                        # Add rebates: one for opening order, one for closing order
+                        opening_rebate = get_options_rebate(leg['underlying'], leg['quantity'])
+
+                        # Calculate closing rebate (sum of matched quantities)
+                        closing_qty = abs(leg['quantity']) - remaining_qty  # Total matched quantity
+                        closing_rebate = get_options_rebate(leg['underlying'], closing_qty)
+
+                        total_rebate = opening_rebate + closing_rebate
+                        realized_pl += total_rebate
+
                         # Use the timestamp of the last closing trade
                         closed_date = last_close_timestamp
-                        print(f"      Final: entry=${entry_amount:.2f} + exit=${leg_exit:.2f} = P&L=${realized_pl:.2f}")
+                        print(f"      Final: entry=${entry_amount:.2f} + exit=${leg_exit:.2f} + rebates=${total_rebate:.2f} = P&L=${realized_pl:.2f}")
             elif status == 'open' and portfolio_positions:
                 for pos in portfolio_positions:
                     pos_symbol = pos.get('instrument', {}).get('symbol', '')
