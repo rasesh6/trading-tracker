@@ -297,5 +297,89 @@ def health():
         'version': '2.3 (FIFO Stock Matching)'
     })
 
+@app.route('/api/debug/all_positions')
+def debug_all_positions():
+    """Debug endpoint to show all positions (open + closed)"""
+    try:
+        token = get_access_token()
+        account_id = get_account_id(token)
+
+        now = datetime.now()
+        year_start = datetime(now.year, 1, 1).strftime('%Y-%m-%dT%H:%M:%SZ')
+        end_date = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        history = fetch_order_history(token, account_id, year_start, end_date)
+        transactions = history.get('transactions', [])
+
+        # Group all trades by contract
+        all_trades = {}
+        for tx in transactions:
+            tx_type = tx.get('type', '')
+            sub_type = tx.get('subType', '')
+
+            if tx_type != 'TRADE' or sub_type != 'TRADE':
+                continue
+
+            net_amount = float(tx.get('netAmount') or 0)
+            description = tx.get('description', '')
+
+            # Try to match any option (not just 260)
+            match = re.search(r'([A-Z]+2\d{2}\d{3}[CP]\d{8})', description)
+            if match:
+                contract = match.group(1)  # Option contract
+            else:
+                # Stock symbol
+                parts = description.split()
+                contract = parts[2] if len(parts) > 2 else 'UNKNOWN'
+
+            if contract not in all_trades:
+                all_trades[contract] = {'buy': 0, 'sell': 0, 'count': 0, 'sample': ''}
+
+            if 'BUY' in description:
+                all_trades[contract]['buy'] += net_amount
+            else:
+                all_trades[contract]['sell'] += net_amount
+
+            all_trades[contract]['count'] += 1
+            all_trades[contract]['sample'] = description
+
+        # Categorize
+        closed = {k: v for k, v in all_trades.items() if v['buy'] != 0 and v['sell'] != 0}
+        only_buy = {k: v for k, v in all_trades.items() if v['buy'] != 0 and v['sell'] == 0}
+        only_sell = {k: v for k, v in all_trades.items() if v['buy'] == 0 and v['sell'] != 0}
+
+        closed_pl = sum(v['buy'] + v['sell'] for v in closed.values())
+        only_buy_pl = sum(v['buy'] for v in only_buy.values())
+        only_sell_pl = sum(v['sell'] for v in only_sell.values())
+
+        return jsonify({
+            'closed_positions': {
+                'count': len(closed),
+                'total_pl': closed_pl,
+                'positions': dict(list(closed.items())[:10])  # First 10
+            },
+            'only_buy': {
+                'count': len(only_buy),
+                'total_pl': only_buy_pl,
+                'positions': dict(list(only_buy.items())[:10])
+            },
+            'only_sell': {
+                'count': len(only_sell),
+                'total_pl': only_sell_pl,
+                'positions': dict(list(only_sell.items())[:10])
+            },
+            'summary': {
+                'closed_only_pl': closed_pl,
+                'closed_plus_sell_only': closed_pl + only_sell_pl,
+                'target': 3693.32,
+                'closed_diff': closed_pl - 3693.32,
+                'with_sell_diff': (closed_pl + only_sell_pl) - 3693.32
+            }
+        })
+
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
