@@ -1,0 +1,78 @@
+Category,Group/Symbol,Side,Quantity,Price,Net Amount,Matched With,Status,P&L
+Option,SOXL_260102,BUY,35,"$39.87","-$1,395.26",,Closed,-$1,395.26
+Option,SOXL_260102,SELL,35,"$45.13","$1,579.65",,Closed,$1,579.65
+Option,SOXL_260102,,,,, ,Net Position,$184.39
+Option,NVDA_260109,BUY,8,"$119.80","-$958.36",,Closed,-$958.36
+Option,NVDA_260109,SELL,8,"$247.20","$1,977.59",,Closed,$1,977.59
+Option,NVDA_260109,,,,, ,Net Position,$1,019.23
+Option,NVDA_260116,BUY,8,"$31.30","-$250.37",,Closed,-$250.37
+Option,NVDA_260116,SELL,8,"$178.20","$1,425.58",,Closed,$1,425.58
+Option,NVDA_260116,,,,, ,Net Position,$1,175.21
+Option,NVDA_260123,SELL,4,"$86.13","$344.53",,Expired worthless,$344.53
+Option,NVDA_260123,SELL,4,"$95.13","$380.53",,Expired worthless,$380.53
+Option,NVDA_260123,,,,, ,Net Position,$725.06
+Option,CRM_260130,BUY,2,"-$153.93","-$307.89",,Closed,-$307.89
+Option,CRM_260130,SELL,2,"$91.13","$182.26",,Closed,$182.26
+Option,CRM_260130,BUY,2,"$143.86","-$287.73",,Closed,-$287.73
+Option,CRM_260130,SELL,2,"$228.05","$456.10",,Closed,$456.10
+Option,CRM_260130,BUY,1,"$64.94","-$64.94",,Closed,-$64.94
+Option,CRM_260130,SELL,1,"$181.05","$181.05",,Closed,$181.05
+Option,CRM_260130,,,,, ,Net Position,$84.12
+Option,FCX_260206,BUY,1,"$38.86","-$38.86",,Closed,-$38.86
+Option,FCX_260206,SELL,1,"$116.05","$116.05",,Closed,$116.05
+Option,FCX_260206,,,,, ,Net Position,$77.19
+Option,GLD_260206,BUY,1,"$633.86","-$633.86",,Closed,-$633.86
+Option,GLD_260206,SELL,1,"$728.05","$728.05",,Closed,$728.05
+Option,GLD_260206,BUY,1,"$493.94","-$493.94",,Closed,-$493.94
+Option,GLD_260206,SELL,1,"$118.13","$118.13",,Closed,$118.13
+Option,GLD_260206,BUY,1,"$141.86","-$141.86",,Closed,-$141.86
+Option,GLD_260206,SELL,1,"$568.05","$568.05",,Closed,$568.05
+Option,GLD_260206,BUY,1,"$621.94","-$621.94",,Closed,-$621.94
+Option,GLD_260206,SELL,1,"$534.13","$534.13",,Closed,$534.13
+Option,GLD_260206,,,,, ,Net Position,$56.76
+Option,NEM_260130,BUY,1,"$101.94","-$101.94",,Closed,-$101.94
+Option,NEM_260130,SELL,1,"$151.05","$151.05",,Closed,$151.05
+Option,NEM_260130,BUY,1,"$40.94","-$40.94",,Closed,-$40.94
+Option,NEM_260130,SELL,1,"$27.05","$27.05",,Closed,$27.05
+Option,NEM_260130,,,,, ,Net Position,$35.22
+Option,QQQ_260128,BUY,1,"$40.94","-$40.94",,Closed,-$40.94
+Option,QQQ_260128,SELL,1,"$115.05","$115.05",,Closed,$115.05
+Option,QQQ_260128,BUY,1,"$64.94","-$64.94",,Closed,-$64.94
+Option,QQQ_260128,SELL,1,"$12.05","$12.05",,Closed,$12.05
+Option,QQQ_260128,,,,, ,Net Position,$21.22
+Option,SLV_260130,BUY,1,"$149.94","-$149.94",,Closed,-$149.94
+Option,SLV_260130,SELL,1,"$260.05","$260.05",,Closed,$260.05
+Option,SLV_260130,BUY,1,"$7.86","-$7.86",,Closed,-$7.86
+Option,SLV_260130,SELL,1,"$3.13","$3.13",,Closed,$3.13
+Option,SLV_260130,,,,, ,Net Position,$105.38
+Option,SPY_260122,BUY,1,"$99.94","-$99.94",,Closed,-$99.94
+Option,SPY_260122,SELL,1,"$65.05","$65.05",,Closed,$65.05
+Option,SPY_260122,,,,, ,Net Position,-$34.89
+Option,NFLX_260320,BUY,1,"$64.86","-$64.86",,Closed,-$64.86
+Option,NFLX_260320,SELL,1,"$185.13","$185.13",,Closed,$185.13
+Option,NFLX_260320,,,,, ,Net Position,$120.27
+Option,USO_260206,BUY,1,"$90.94","-$90.94",,Closed,-$90.94
+Option,USO_260206,SELL,1,"$152.05","$152.05",,Closed,$152.05
+Option,USO_260206,,,,, ,Net Position,$61.11
+Option,XLE_260306,BUY,1,"$70.94","-$70.94",,Closed,-$70.94
+Option,XLE_260306,SELL,1,"$81.05","$81.05",,Closed,$81.05
+Option,XLE_260306,,,,, ,Net Position,$10.11
+Option,OPTIONS SUBTOTAL,,,,, ,,$3,414.12
+Excluded,SOXL_260130,SELL,20 contracts,"$65.13/contract","$1,302.63",Strike $65,Assigned to SOXL stock OPEN,$1,302.63
+Excluded,SOXL (assigned),STOCK,2000 shares,"$64.35/share","$128,697.37",Cost basis $65 - $0.6513 premium,OPEN,Not counted
+Stock,SOXL,BUY,3500,"$46.76","-$163,660.03",,Closed (matched),
+Stock,SOXL,SELL,3500,"$46.81","$163,835.11",BUY 3500 @ $46.76,Closed,$175.08
+Stock,NVDA,BUY,400,"$185.01","-$74,004.00",,Closed (matched),
+Stock,NVDA,SELL,400,"$185.05","$74,019.92",BUY 400 @ $185.01,Closed,$15.92
+Stock,NVDA,BUY,100,"$179.00","-$17,900.00",,Closed (matched),
+Stock,NVDA,SELL,100,"$179.66","$17,966.08",BUY 100 @ $179.00,Closed,$66.08
+Stock,NVDA,BUY,100,"$179.25","-$17,925.00",,Closed (matched),
+Stock,NVDA,SELL,100,"$180.10","$18,009.98",BUY 100 @ $179.25,Closed,$84.98
+Stock,SOXL,BUY,2000,"$65.00","-$130,000.00",,OPEN from assignment,Not counted
+Stock,STOCKS SUBTOTAL,,,,, ,,$342.06
+Summary,Options (closed),,,, ,$3,414.12
+Summary,Stocks (closed),,,, ,$342.06
+Summary,TOTAL CALCULATED,,,,, ,$3,756.14
+Summary,PUBLIC.COM TARGET,,,,, ,$3,693.32
+Summary,DIFFERENCE,,,,, ,$62.82
+Summary,PERCENTAGE,,,,, ,1.7%
