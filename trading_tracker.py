@@ -196,6 +196,7 @@ def calculate_pl_from_history():
 
         # Calculate options P&L
         options_pl = 0
+        options_unrealized_pl = 0  # Track unrealized for open positions
         completed_transactions = []
         closed_option_positions = 0
         open_option_positions = 0
@@ -217,6 +218,10 @@ def calculate_pl_from_history():
             else:
                 # Still open in portfolio (or assigned to stock that's still open)
                 open_option_positions += 1
+                # Unrealized P&L = premium received - premium paid (if still open)
+                # For short options: positive premium = unrealized profit
+                # For long options: negative premium = unrealized loss
+                options_unrealized_pl += (data['buy'] + data['sell'])
 
         # Calculate stock P&L using FIFO matching
         stock_trades.sort(key=lambda x: x['timestamp'])
@@ -268,12 +273,15 @@ def calculate_pl_from_history():
             open_stock_positions += len(queue)
 
         total_realized_pl = options_pl + stocks_pl
+        # Unrealized: open options (premium) + open stocks (cost basis of open longs)
+        # Note: For open short options, premium received counts as unrealized profit
+        total_unrealized_pl = options_unrealized_pl  # Stocks would need current market prices
 
         result = {
             'total_realized_pl': total_realized_pl,
             'short_term_pl': total_realized_pl,
             'long_term_pl': 0,
-            'total_unrealized_pl': 0,
+            'total_unrealized_pl': total_unrealized_pl,
             'total_positions': closed_option_positions + closed_stock_positions,
             'open_positions': open_option_positions + open_stock_positions,
             'transactions': completed_transactions,
@@ -362,7 +370,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.1-FINAL (Realized P&L: $3,756.14 - matches target)'
+        'version': '3.2 (Unrealized P&L calculation added)'
     })
 
 @app.route('/api/debug/all_positions')
