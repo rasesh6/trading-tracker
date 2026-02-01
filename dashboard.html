@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Trading Tracker Dashboard - Spreads</title>
+    <title>Trading Tracker Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; }
-        .container { max-width: 1600px; margin: 0 auto; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
 
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
         .header h1 { font-size: 28px; font-weight: 600; }
@@ -18,7 +18,7 @@
         .update-btn:hover { background: #2563eb; }
         .reset-btn:hover { background: #dc2626; }
 
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 30px; }
         .stat-card { background: #1e293b; border-radius: 12px; padding: 20px; }
         .stat-card h3 { font-size: 14px; color: #94a3b8; margin-bottom: 8px; }
         .stat-card .value { font-size: 32px; font-weight: 700; }
@@ -28,41 +28,37 @@
 
         .section { background: #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 30px; }
         .section h2 { font-size: 18px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; }
-        .section h2 .count { font-size: 14px; color: #64748b; font-weight: normal; }
 
-        .spread-card {
+        .transaction-list { max-height: 500px; overflow-y: auto; }
+        .transaction-item {
             background: #0f172a;
             border: 1px solid #334155;
             border-radius: 8px;
-            padding: 16px;
-            margin-bottom: 12px;
+            padding: 12px;
+            margin-bottom: 8px;
+            font-size: 13px;
         }
-        .spread-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-        .spread-title { font-size: 16px; font-weight: 600; }
-        .spread-type { font-size: 12px; color: #94a3b8; margin-top: 4px; }
-        .spread-pl { font-size: 24px; font-weight: 700; }
-        .spread-pl.positive { color: #22c55e; }
-        .spread-pl.negative { color: #ef4444; }
-        .spread-meta { display: flex; gap: 20px; font-size: 13px; color: #64748b; }
-        .spread-legs { margin-top: 12px; padding-top: 12px; border-top: 1px solid #334155; }
-        .spread-leg { display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; }
-        .leg-symbol { font-family: monospace; }
-        .leg-side { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
-        .leg-side.BUY { background: #22c55e20; color: #22c55e; }
-        .leg-side.SELL { background: #ef444420; color: #ef4444; }
+        .transaction-item .desc { font-family: monospace; margin-bottom: 4px; }
+        .transaction-item .meta { color: #64748b; font-size: 12px; }
+        .transaction-item .amount { float: right; font-weight: 600; }
+        .transaction-item .amount.positive { color: #22c55e; }
+        .transaction-item .amount.negative { color: #ef4444; }
 
         .chart-section { background: #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 30px; }
         .chart-section h2 { font-size: 18px; margin-bottom: 15px; }
 
         .last-updated { text-align: center; color: #64748b; margin-top: 20px; }
+        .version { text-align: center; color: #475569; font-size: 12px; margin-top: 10px; }
+
+        .loading { text-align: center; padding: 40px; color: #94a3b8; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>Options Spread Tracker</h1>
+            <h1>Trading Tracker</h1>
             <div class="header-buttons">
-                <button class="reset-btn" onclick="resetData()">Reset DB</button>
+                <button class="reset-btn" onclick="resetData()">Reset Cache</button>
                 <button class="update-btn" onclick="updateData()">Update Data</button>
             </div>
         </div>
@@ -80,195 +76,131 @@
             </div>
             <div class="stat-card">
                 <h3>Total Unrealized P&L</h3>
-                <div class="value" id="total-unrealized-pl">$0.00</div>
-                <div class="sub" id="open-count-label">0 open spreads</div>
+                <div class="value" id="unrealized-pl">$0.00</div>
+                <div class="sub" id="open-count">0 open positions</div>
             </div>
             <div class="stat-card">
-                <h3>Total Spreads</h3>
-                <div class="value" id="total-spreads">0</div>
-                <div class="sub" id="closed-spreads">0 closed</div>
+                <h3>Total Positions</h3>
+                <div class="value" id="total-positions">0</div>
+                <div class="sub" id="open-positions">0 open</div>
             </div>
         </div>
 
         <div class="chart-section">
-            <h2>Cumulative P&L (All Spreads)</h2>
+            <h2>Cumulative P&L (YTD)</h2>
             <canvas id="pnlChart" height="100"></canvas>
         </div>
 
         <div class="section">
-            <h2>Open Spreads <span class="count" id="open-spreads-count">0</span></h2>
-            <div id="open-spreads"></div>
+            <h2>Recent Transactions</h2>
+            <div class="transaction-list" id="transactions"></div>
         </div>
 
-        <div class="section">
-            <h2>Single Legs <span class="count" id="single-legs-count">0</span></h2>
-            <div id="single-legs"></div>
-        </div>
-
-        <div class="section">
-            <h2>Closed Spreads <span class="count" id="closed-count-label">0</span></h2>
-            <div id="closed-spreads"></div>
-        </div>
-
-        <p class="last-updated">Last updated: <span id="last-updated">Never</span></p>
+        <p class="last-updated">Last updated: <span id="last-updated">Loading...</span></p>
+        <p class="version" id="version"></p>
     </div>
 
     <script>
         let pnlChart = null;
 
         async function loadData() {
-            const response = await fetch('/api/stats');
-            const data = await response.json();
+            try {
+                const response = await fetch('/api/stats');
+                const data = await response.json();
 
-            // Update stats
-            const pl = (val) => {
-                const v = val || 0;
-                return v >= 0 ? `+$${v.toFixed(2)}` : `-$${Math.abs(v).toFixed(2)}`;
-            };
-            const setPl = (id, val) => {
-                const el = document.getElementById(id);
-                el.textContent = pl(val);
-                el.className = 'value ' + (val >= 0 ? 'positive' : 'negative');
-            };
+                if (data.error) {
+                    document.getElementById('transactions').innerHTML = `<div class="loading">Error: ${data.error}</div>`;
+                    return;
+                }
 
-            setPl('mtd-pl', data.mtd_realized_pl);
-            setPl('ytd-pl', data.ytd_realized_pl);
-            setPl('total-unrealized-pl', data.total_unrealized_pl);
-            document.getElementById('mtd-closed').textContent = `${data.mtd_closed} closed this month`;
-            document.getElementById('ytd-closed').textContent = `${data.ytd_closed} closed this year`;
-            document.getElementById('total-spreads').textContent = data.total_spreads;
-            document.getElementById('closed-spreads').textContent = `${data.closed_spreads} closed`;
-            document.getElementById('open-spreads-count').textContent = data.open_spreads;
-            document.getElementById('single-legs-count').textContent = data.open_single_legs || 0;
+                // Format P&L
+                const pl = (val) => {
+                    const v = val || 0;
+                    return v >= 0 ? `+$${v.toFixed(2)}` : `-$${Math.abs(v).toFixed(2)}`;
+                };
+                const setPl = (id, val) => {
+                    const el = document.getElementById(id);
+                    el.textContent = pl(val);
+                    el.className = 'value ' + (val >= 0 ? 'positive' : 'negative');
+                };
 
-            document.getElementById('open-count-label').textContent = `${data.open_spreads} open spreads`;
-            document.getElementById('closed-count-label').textContent = `(${data.closed_spreads})`;
-            document.getElementById('last-updated').textContent = new Date().toLocaleString();
+                // Update stats
+                setPl('mtd-pl', data.mtd_realized_pl);
+                setPl('ytd-pl', data.ytd_realized_pl);
+                setPl('unrealized-pl', data.total_unrealized_pl);
 
-            // Render spreads
-            renderSpreads(data.spreads);
+                document.getElementById('mtd-closed').textContent = `${data.mtd_closed} closed this month`;
+                document.getElementById('ytd-closed').textContent = `${data.ytd_closed} closed this year`;
 
-            // Render single legs
-            renderSingleLegs(data.single_legs || []);
+                const openCount = data.open_positions || 0;
+                const totalPositions = data.total_positions || 0;
+                const closedCount = totalPositions - openCount;
 
-            // Load chart data
-            loadChartData();
-        }
+                document.getElementById('total-positions').textContent = totalPositions;
+                document.getElementById('open-positions').textContent = `${openCount} open • ${closedCount} closed`;
+                document.getElementById('open-count').textContent = `${openCount} open positions`;
 
-        function renderSpreads(spreads) {
-            const openContainer = document.getElementById('open-spreads');
-            const closedContainer = document.getElementById('closed-spreads');
+                // Version
+                if (data.transactions && data.transactions.length > 0) {
+                    const tx = data.transactions[0];
+                    const date = new Date(data.last_updated);
+                    document.getElementById('last-updated').textContent = date.toLocaleString();
 
-            const openSpreads = spreads.filter(s => s.status === 'open');
-            const closedSpreads = spreads.filter(s => s.status === 'closed');
+                    // Version from health endpoint
+                    fetch('/api/health')
+                        .then(r => r.json())
+                        .then(h => {
+                            document.getElementById('version').textContent = `Version: ${h.version || 'Unknown'}`;
+                        });
+                }
 
-            openContainer.innerHTML = openSpreads.length ? openSpreads.map(s => renderSpreadCard(s)).join('') : '<p style="color:#64748b;">No open spreads</p>';
-            closedContainer.innerHTML = closedSpreads.length ? closedSpreads.map(s => renderSpreadCard(s)).join('') : '<p style="color:#64748b;">No closed spreads</p>';
-        }
+                // Render transactions
+                renderTransactions(data.transactions || []);
 
-        function renderSingleLegs(singleLegs) {
-            const container = document.getElementById('single-legs');
-            const openLegs = singleLegs.filter(l => l.status === 'open');
-            const closedLegs = singleLegs.filter(l => l.status === 'closed');
+                // Load chart
+                loadChartData(data.transactions || []);
 
-            let html = '';
-            if (openLegs.length) {
-                html += '<h3 style="color:#94a3b8;margin:15px 0 10px;">Open Single Legs</h3>';
-                html += openLegs.map(l => renderSingleLegCard(l)).join('');
+            } catch (error) {
+                console.error('Error loading data:', error);
+                document.getElementById('transactions').innerHTML = `<div class="loading">Error: ${error.message}</div>`;
             }
-            if (closedLegs.length) {
-                html += '<h3 style="color:#94a3b8;margin:15px 0 10px;">Closed Single Legs</h3>';
-                html += closedLegs.slice(0, 10).map(l => renderSingleLegCard(l)).join(''); // Show first 10
-            }
-
-            container.innerHTML = html || '<p style="color:#64748b;">No single legs</p>';
         }
 
-        function renderSingleLegCard(leg) {
-            const optType = leg.opt_type === 'C' ? 'CALL' : 'PUT';
-            const legType = `${leg.side} ${optType}`;
-            const isClosed = leg.status === 'closed';
-            const pl = isClosed ? (leg.realized_pl || 0) : (leg.unrealized_pl || 0);
-            const plClass = pl >= 0 ? 'positive' : 'negative';
+        function renderTransactions(transactions) {
+            const container = document.getElementById('transactions');
 
-            const openedDate = new Date(leg.opened_date).toLocaleDateString();
-
-            // Calculate entry total: entry_price is per-contract, quantity is number of contracts
-            const entryTotal = parseFloat(leg.entry_price || 0) * parseFloat(leg.quantity || 1);
-
-            // Determine display sign based on position type
-            // SELL PUT/CALL (short): received premium = positive
-            // BUY PUT/CALL (long): paid premium = negative
-            let entryDisplay;
-            if (leg.side === 'SELL') {
-                // Short position: received premium
-                entryDisplay = `+$${Math.abs(entryTotal).toFixed(2)}`;
-            } else {
-                // Long position: paid premium
-                entryDisplay = `-$${Math.abs(entryTotal).toFixed(2)}`;
+            if (!transactions || transactions.length === 0) {
+                container.innerHTML = '<p style="color:#64748b; text-align:center; padding:20px;">No transactions</p>';
+                return;
             }
 
-            return `
-                <div class="spread-card">
-                    <div class="spread-header">
-                        <div>
-                            <div class="spread-title">${leg.underlying} - ${leg.expiry} @ $${leg.strike}</div>
-                            <div class="spread-type">${legType} × ${leg.quantity}</div>
-                        </div>
-                        <div class="spread-pl ${plClass}">
-                            ${pl >= 0 ? '+' : ''}$${pl.toFixed(2)}
-                        </div>
+            // Show first 50 transactions
+            const txs = transactions.slice(0, 50);
+
+            container.innerHTML = txs.map(tx => {
+                const amount = parseFloat(tx.netAmount || 0);
+                const amountClass = amount >= 0 ? 'positive' : 'negative';
+                const isOption = tx.description.includes('260') || tx.description.includes('261') || tx.description.includes('262');
+
+                return `
+                    <div class="transaction-item ${isOption ? 'option-tx' : ''}">
+                        <div class="desc">${tx.description}</div>
+                        <div class="meta">${new Date(tx.timestamp || Date.now()).toLocaleDateString()}</div>
+                        <div class="amount ${amountClass}">${amount >= 0 ? '+' : ''}$${Math.abs(amount).toFixed(2)}</div>
+                        <div style="clear:both;"></div>
                     </div>
-                    <div class="spread-meta">
-                        <span>Opened: ${openedDate}</span>
-                        <span style="color:${isClosed ? '#10b981' : '#f59e0b'};">${isClosed ? 'CLOSED' : 'OPEN'}</span>
-                        <span>Entry: ${entryDisplay}</span>
-                        <span>@ $${Math.abs(leg.entry_price).toFixed(2)}</span>
-                    </div>
-                </div>
-            `;
+                `;
+            }).join('');
         }
 
-        function renderSpreadCard(spread) {
-            const legs = JSON.parse(spread.legs || '[]');
-            const isClosed = spread.status === 'closed';
-            const displayPl = isClosed ? spread.realized_pl : (spread.unrealized_pl || 0);
-            const plClass = displayPl >= 0 ? 'positive' : 'negative';
-
-            const openedDate = new Date(spread.opened_date).toLocaleDateString();
-            const closedDate = isClosed && spread.closed_date ? new Date(spread.closed_date).toLocaleDateString() : null;
-
-            return `
-                <div class="spread-card">
-                    <div class="spread-header">
-                        <div>
-                            <div class="spread-title">${spread.underlying} - ${spread.expiry}</div>
-                            <div class="spread-type">${spread.spread_type}</div>
-                        </div>
-                        <div class="spread-pl ${plClass}">
-                            ${displayPl >= 0 ? '+' : ''}$${(displayPl || 0).toFixed(2)}
-                        </div>
-                    </div>
-                    <div class="spread-meta">
-                        <span>Opened: ${openedDate}</span>
-                        ${closedDate ? `<span>Closed: ${closedDate}</span>` : '<span style="color:#f59e0b;">OPEN</span>'}
-                        <span>Entry: ${spread.entry_credit >= 0 ? '+' : ''}$${spread.entry_credit.toFixed(2)}</span>
-                        ${isClosed ? `<span>Exit: $${(spread.exit_debit || 0).toFixed(2)}</span>` : ''}
-                    </div>
-                </div>
-            `;
-        }
-
-        async function loadChartData() {
-            const response = await fetch('/api/trades?days=365');
-            const spreads = await response.json();
-
+        async function loadChartData(transactions) {
             // Group by date for cumulative P&L
             const dailyPl = {};
-            for (const spread of spreads) {
-                if (spread.status === 'closed' && spread.realized_pl !== 0) {
-                    const date = new Date(spread.closed_date || spread.opened_date).toLocaleDateString();
-                    dailyPl[date] = (dailyPl[date] || 0) + spread.realized_pl;
+            for (const tx of transactions) {
+                const amount = parseFloat(tx.netAmount || 0);
+                if (amount !== 0) {
+                    const date = new Date(tx.timestamp || Date.now()).toLocaleDateString();
+                    dailyPl[date] = (dailyPl[date] || 0) + amount;
                 }
             }
 
@@ -287,6 +219,11 @@
             const ctx = document.getElementById('pnlChart').getContext('2d');
 
             if (pnlChart) pnlChart.destroy();
+
+            if (data.length === 0) {
+                // Empty chart
+                return;
+            }
 
             pnlChart = new Chart(ctx, {
                 type: 'line',
@@ -315,22 +252,34 @@
         async function updateData() {
             const btn = document.querySelector('.update-btn');
             btn.textContent = 'Updating...';
-            await fetch('/api/update');
-            await loadData();
-            btn.textContent = 'Update Data';
+            try {
+                await fetch('/api/update');
+                await loadData();
+                btn.textContent = 'Update Data';
+            } catch (error) {
+                btn.textContent = 'Update Error';
+                console.error(error);
+            }
         }
 
         async function resetData() {
-            if (!confirm('This will delete all data and recalculate from Public API. Continue?')) return;
+            if (!confirm('This will clear the cache and recalculate from Public API. Continue?')) return;
             const btn = document.querySelector('.reset-btn');
             btn.textContent = 'Resetting...';
-            await fetch('/api/reset');
-            await loadData();
-            btn.textContent = 'Reset DB';
+            try {
+                await fetch('/api/reset');
+                await loadData();
+                btn.textContent = 'Reset Cache';
+            } catch (error) {
+                btn.textContent = 'Reset Error';
+                console.error(error);
+            }
         }
 
-        // Auto-refresh every 5 minutes
+        // Load data on page load
         loadData();
+
+        // Auto-refresh every 5 minutes
         setInterval(loadData, 300000);
     </script>
 </body>
