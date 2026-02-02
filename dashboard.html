@@ -189,20 +189,37 @@
                         }
                     }
                 } else {
-                    // Stock transaction - group by symbol
-                    const parts = desc.split(' ');
-                    if (parts.length >= 3) {
-                        const symbol = parts[2];
+                    // Check if it's a synthetic stock P&L transaction (type='stock_pnl')
+                    if (tx.type === 'stock_pnl' && tx.symbol) {
+                        const symbol = tx.symbol;
                         if (!stockPositions[symbol]) {
                             stockPositions[symbol] = { transactions: [], totalPl: 0, tradeCount: 0 };
                         }
                         stockPositions[symbol].transactions.push(tx);
                         stockPositions[symbol].totalPl += netAmount;
                         stockPositions[symbol].tradeCount += 1;
-                        // Update closing date (latest timestamp for this symbol)
+                        // Use the timestamp as closing date (SELL date)
                         if (timestamp) {
                             if (!stockPositions[symbol].closing_date || timestamp > stockPositions[symbol].closing_date) {
                                 stockPositions[symbol].closing_date = timestamp;
+                            }
+                        }
+                    } else {
+                        // Legacy stock transaction - group by symbol
+                        const parts = desc.split(' ');
+                        if (parts.length >= 3) {
+                            const symbol = parts[2];
+                            if (!stockPositions[symbol]) {
+                                stockPositions[symbol] = { transactions: [], totalPl: 0, tradeCount: 0 };
+                            }
+                            stockPositions[symbol].transactions.push(tx);
+                            stockPositions[symbol].totalPl += netAmount;
+                            stockPositions[symbol].tradeCount += 1;
+                            // Update closing date (latest timestamp for this symbol)
+                            if (timestamp) {
+                                if (!stockPositions[symbol].closing_date || timestamp > stockPositions[symbol].closing_date) {
+                                    stockPositions[symbol].closing_date = timestamp;
+                                }
                             }
                         }
                     }

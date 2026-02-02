@@ -376,11 +376,15 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     match_pl = (sell_amount_per_share - buy_amount_per_share) * match_qty
                     stocks_pl += match_pl
 
-                    # Add copies with preserved quantities to completed_transactions
-                    buy_copy = buy_trade.copy()
-                    buy_copy['quantity'] = buy_trade.get('original_quantity', match_qty)
-                    completed_transactions.append(buy_copy)
-                    completed_transactions.append(trade)
+                    # Add synthetic P&L transaction with closing date for chart
+                    # This ensures stock P&L is included in cumulative chart
+                    completed_transactions.append({
+                        'netAmount': match_pl,
+                        'description': f'Stock P&L: {symbol} {match_qty} shares',
+                        'timestamp': trade['timestamp'],  # Closing date (SELL date)
+                        'type': 'stock_pnl',
+                        'symbol': symbol
+                    })
 
                     remaining_qty -= match_qty
                     buy_trade['quantity'] -= match_qty
@@ -607,7 +611,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.10 (FIX: Cumulative P&L chart now shows full position P&L on closing date, not spread across transaction dates)'
+        'version': '3.11 (FIX: Stock P&L now included in cumulative chart via synthetic transactions)'
     })
 
 @app.route('/api/debug/stock_trades')
