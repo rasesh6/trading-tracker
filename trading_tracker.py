@@ -9,7 +9,7 @@ Uses Public.com History API for exact P&L calculation.
 import os
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from flask import Flask, jsonify, send_file, request
 from requests import post, get
 
@@ -465,7 +465,8 @@ def get_stats():
 
     # Calculate MTD based on positions that CLOSED in the current month
     # not transactions that occurred in the current month
-    now = datetime.now()
+    # Use UTC consistently to avoid timezone mismatches (server runs in UTC)
+    now = datetime.now(timezone.utc)
     current_month = now.month
     current_year = now.year
 
@@ -611,7 +612,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.11 (FIX: Stock P&L now included in cumulative chart via synthetic transactions)'
+        'version': '3.12 (FIX: MTD calculation now uses UTC timezone consistently)'
     })
 
 @app.route('/api/debug/stock_trades')
