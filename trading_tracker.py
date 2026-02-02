@@ -279,6 +279,31 @@ def calculate_pl_from_history():
         for symbol, queue in stock_positions.items():
             open_stock_positions += len(queue)
 
+        # Count ALL open positions from portfolio (including those opened before YTD)
+        # Portfolio already has current open positions regardless of when they were opened
+        portfolio_open_count = 0
+        if 'positions' in portfolio:
+            # Group option positions by underlying_expiry to count spreads as 1
+            portfolio_option_groups = set()
+            portfolio_stock_count = 0
+
+            for pos in portfolio['positions']:
+                instrument = pos.get('instrument', {})
+                symbol = instrument.get('symbol', '')
+                inst_type = instrument.get('type', '')
+
+                if inst_type == 'OPTION':
+                    # Group by underlying_expiry (e.g., "WMT_260206")
+                    m = re.match(r'([A-Z]+)(\d{6})([CP])(\d{8})', symbol)
+                    if m:
+                        group_key = f'{m.group(1)}_{m.group(2)}'
+                        portfolio_option_groups.add(group_key)
+                elif inst_type == 'EQUITY':
+                    # Stock position
+                    portfolio_stock_count += 1
+
+            portfolio_open_count = len(portfolio_option_groups) + portfolio_stock_count
+
         total_realized_pl = options_pl + stocks_pl
         # total_unrealized_pl already calculated from portfolio API above
 
@@ -288,7 +313,7 @@ def calculate_pl_from_history():
             'long_term_pl': 0,
             'total_unrealized_pl': total_unrealized_pl,
             'total_positions': closed_option_positions + closed_stock_positions,
-            'open_positions': open_option_positions + open_stock_positions,
+            'open_positions': portfolio_open_count,  # Use actual portfolio count
             'transactions': completed_transactions,
             'last_updated': now.isoformat()
         }
@@ -375,7 +400,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.4 (No hardcoded positions; All detection dynamic via Portfolio API; Realized: $5,129.99, Unrealized: -$17,701.79)'
+        'version': '3.5 (Count all portfolio positions including pre-YTD; Realized: $5,129.99, Unrealized: -$17,659.68, Open: 3)'
     })
 
 @app.route('/api/debug/all_positions')
