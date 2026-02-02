@@ -453,24 +453,98 @@ def calculate_pl_from_history(start_date=None, end_date=None):
 
 def get_stats():
     """Get trading statistics with separate MTD and YTD calculations"""
-    # Get YTD data (Jan 1 to now)
+    # Get YTD data (Jan 1 to now) - this has all completed transactions
     ytd_data = calculate_pl_from_history()
 
     if 'error' in ytd_data:
         return ytd_data
 
-    # Get MTD data (first day of current month to now)
+    # Calculate MTD based on positions that CLOSED in the current month
+    # not transactions that occurred in the current month
     now = datetime.now()
-    month_start = datetime(now.year, now.month, 1).strftime('%Y-%m-%dT%H:%M:%SZ')
-    mtd_data = calculate_pl_from_history(start_date=month_start)
+    current_month = now.month
+    current_year = now.year
 
-    if 'error' in mtd_data:
-        # If MTD fails, use YTD values as fallback
-        mtd_realized_pl = ytd_data['total_realized_pl']
-        mtd_closed = ytd_data['total_positions']
-    else:
-        mtd_realized_pl = mtd_data['total_realized_pl']
-        mtd_closed = mtd_data['total_positions']
+    # Group completed transactions by position to find closing dates
+    # For options: group by underlying/expiry (key format: "UNDERLYING_YYMMDD")
+    # For stocks: FIFO pairs are already matched in completed_transactions
+    mtd_realized_pl = 0
+    mtd_closed = 0
+
+    transactions = ytd_data.get('transactions', [])
+
+    # Group transactions to identify positions and their closing dates
+    option_positions = {}  # key -> {transactions: [], closing_date: None}
+    stock_positions = {}   # symbol -> {transactions: [], closing_date: None}
+
+    for tx in transactions:
+        desc = tx.get('description', '')
+        timestamp = tx.get('timestamp', '')
+        net_amount = tx.get('netAmount', 0)
+
+        # Check if it's an option transaction
+        option_match = re.search(r'([A-Z]+2\d{2}\d{3}[CP]\d{8})', desc)
+        if option_match:
+            # Extract underlying and expiry for grouping
+            m = re.match(r'([A-Z]+)(\d{6})([CP])(\d{8})', option_match.group(1))
+            if m:
+                key = f"{m.group(1)}_{m.group(2)}"  # underlying_expiry
+            else:
+                key = option_match.group(1)
+
+            if key not in option_positions:
+                option_positions[key] = {'transactions': [], 'total_pl': 0}
+            option_positions[key]['transactions'].append(tx)
+            option_positions[key]['total_pl'] += net_amount
+            # Update closing date (latest timestamp for this position)
+            if timestamp:
+                if option_positions[key].get('closing_date') is None or timestamp > option_positions[key]['closing_date']:
+                    option_positions[key]['closing_date'] = timestamp
+        else:
+            # Stock transaction - group by symbol
+            # Extract symbol from description (e.g., "BUY 100 SOXL")
+            parts = desc.split()
+            if len(parts) >= 3:
+                symbol = parts[2]
+                if symbol not in stock_positions:
+                    stock_positions[symbol] = {'transactions': [], 'total_pl': 0, 'trade_count': 0}
+                stock_positions[symbol]['transactions'].append(tx)
+                stock_positions[symbol]['total_pl'] += net_amount
+                stock_positions[symbol]['trade_count'] += 1
+                # Update closing date (latest timestamp for this symbol)
+                if timestamp:
+                    if stock_positions[symbol].get('closing_date') is None or timestamp > stock_positions[symbol]['closing_date']:
+                        stock_positions[symbol]['closing_date'] = timestamp
+
+    # Sum P&L for positions that closed in current month
+    # For options: each key is a position
+    for key, pos_data in option_positions.items():
+        closing_date = pos_data.get('closing_date')
+        if closing_date:
+            try:
+                # Parse timestamp like "2026-02-02T15:30:00Z"
+                dt = datetime.fromisoformat(closing_date.replace('Z', '+00:00'))
+                if dt.month == current_month and dt.year == current_year:
+                    mtd_realized_pl += pos_data['total_pl']
+                    mtd_closed += 1
+            except:
+                pass
+
+    # For stocks: each FIFO pair closed in current month
+    # Stocks are matched as BUY+SELL pairs, so we count positions closed
+    for symbol, pos_data in stock_positions.items():
+        closing_date = pos_data.get('closing_date')
+        if closing_date:
+            try:
+                dt = datetime.fromisoformat(closing_date.replace('Z', '+00:00'))
+                if dt.month == current_month and dt.year == current_year:
+                    # For stocks, trade_count should be even (BUY+SELL pairs)
+                    # Each pair is one position
+                    pairs = pos_data['trade_count'] // 2
+                    mtd_realized_pl += pos_data['total_pl']
+                    mtd_closed += pairs
+            except:
+                pass
 
     ytd_realized_pl = ytd_data['total_realized_pl']
 
@@ -533,7 +607,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.8 (FIX: BUY trades now show correct quantities and side in transactions - FIFO matching preserves original_quantity)'
+        'version': '3.9 (FIX: MTD calculation now shows P&L of positions closed in current month, not just transactions in current month)'
     })
 
 @app.route('/api/debug/stock_trades')

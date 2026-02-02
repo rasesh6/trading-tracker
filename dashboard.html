@@ -91,11 +91,6 @@
             <canvas id="pnlChart" height="100"></canvas>
         </div>
 
-        <div class="section">
-            <h2>Recent Transactions</h2>
-            <div class="transaction-list" id="transactions"></div>
-        </div>
-
         <p class="last-updated">Last updated: <span id="last-updated">Loading...</span></p>
         <p class="version" id="version"></p>
     </div>
@@ -109,7 +104,7 @@
                 const data = await response.json();
 
                 if (data.error) {
-                    document.getElementById('transactions').innerHTML = `<div class="loading">Error: ${data.error}</div>`;
+                    console.error('Error:', data.error);
                     return;
                 }
 
@@ -140,57 +135,22 @@
                 document.getElementById('open-positions').textContent = `${openCount} open • ${closedCount} closed`;
                 document.getElementById('open-count').textContent = `${openCount} open positions`;
 
-                // Version
-                if (data.transactions && data.transactions.length > 0) {
-                    const tx = data.transactions[0];
-                    const date = new Date(data.last_updated);
-                    document.getElementById('last-updated').textContent = date.toLocaleString();
+                // Version and last updated
+                const date = new Date(data.last_updated);
+                document.getElementById('last-updated').textContent = date.toLocaleString();
 
-                    // Version from health endpoint
-                    fetch('/api/health')
-                        .then(r => r.json())
-                        .then(h => {
-                            document.getElementById('version').textContent = `Version: ${h.version || 'Unknown'}`;
-                        });
-                }
-
-                // Render transactions
-                renderTransactions(data.transactions || []);
+                fetch('/api/health')
+                    .then(r => r.json())
+                    .then(h => {
+                        document.getElementById('version').textContent = `Version: ${h.version || 'Unknown'}`;
+                    });
 
                 // Load chart
                 loadChartData(data.transactions || []);
 
             } catch (error) {
                 console.error('Error loading data:', error);
-                document.getElementById('transactions').innerHTML = `<div class="loading">Error: ${error.message}</div>`;
             }
-        }
-
-        function renderTransactions(transactions) {
-            const container = document.getElementById('transactions');
-
-            if (!transactions || transactions.length === 0) {
-                container.innerHTML = '<p style="color:#64748b; text-align:center; padding:20px;">No transactions</p>';
-                return;
-            }
-
-            // Show first 50 transactions
-            const txs = transactions.slice(0, 50);
-
-            container.innerHTML = txs.map(tx => {
-                const amount = parseFloat(tx.netAmount || 0);
-                const amountClass = amount >= 0 ? 'positive' : 'negative';
-                const isOption = tx.description.includes('260') || tx.description.includes('261') || tx.description.includes('262');
-
-                return `
-                    <div class="transaction-item ${isOption ? 'option-tx' : ''}">
-                        <div class="desc">${tx.description}</div>
-                        <div class="meta">${new Date(tx.timestamp || Date.now()).toLocaleDateString()}</div>
-                        <div class="amount ${amountClass}">${amount >= 0 ? '+' : ''}$${Math.abs(amount).toFixed(2)}</div>
-                        <div style="clear:both;"></div>
-                    </div>
-                `;
-            }).join('');
         }
 
         async function loadChartData(transactions) {
