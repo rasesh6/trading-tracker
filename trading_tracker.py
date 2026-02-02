@@ -182,21 +182,20 @@ def calculate_pl_from_history():
                     data['any_in_portfolio'] = True  # Mark as "open" since stock position is open
 
         # Manually mark groups as open that should be excluded from realized P&L
-        # These groups have contracts that are still OPEN according to Public.com
+        # NOTE: USO_260206 and XLE_260306 are now CLOSED (both legs traded, not in portfolio)
+        # SOXL_260130 was assigned to stock - exclude from realized P&L
+        # NFLX_260320 remains open (both legs still in portfolio)
         open_groups_to_exclude = [
             'NFLX_260320',  # Both legs still open in portfolio
-            'USO_260206',    # Both legs still open in portfolio
-            'XLE_260306',    # Both legs still open in portfolio
-            'SOXL_260130',   # Assigned to SOXL stock (still open)
+            'SOXL_260130',  # Assigned to SOXL stock (exclude premium from realized P&L)
         ]
 
         for key in option_trades:
             if key in open_groups_to_exclude:
                 option_trades[key]['any_in_portfolio'] = True
 
-        # Calculate options P&L
+        # Calculate options P&L (realized only)
         options_pl = 0
-        options_unrealized_pl = 0  # Track unrealized for open positions
         completed_transactions = []
         closed_option_positions = 0
         open_option_positions = 0
@@ -218,10 +217,28 @@ def calculate_pl_from_history():
             else:
                 # Still open in portfolio (or assigned to stock that's still open)
                 open_option_positions += 1
-                # Unrealized P&L = premium received - premium paid (if still open)
-                # For short options: positive premium = unrealized profit
-                # For long options: negative premium = unrealized loss
-                options_unrealized_pl += (data['buy'] + data['sell'])
+
+        # Calculate unrealized P&L from portfolio API (using cost basis)
+        total_unrealized_pl = 0
+        if 'positions' in portfolio:
+            for pos in portfolio['positions']:
+                current_value = float(pos.get('currentValue', 0))
+                cost_basis_dict = pos.get('costBasis', {})
+
+                # Parse cost basis (it's a string representation of dict)
+                if isinstance(cost_basis_dict, str):
+                    import ast
+                    try:
+                        cost_basis_dict = ast.literal_eval(cost_basis_dict)
+                    except:
+                        cost_basis_dict = {}
+
+                total_cost = float(cost_basis_dict.get('totalCost', 0))
+
+                # Unrealized P&L = current value - cost basis
+                # For short positions (negative quantity): cost is negative, so (value - cost) works correctly
+                unrealized = current_value - total_cost
+                total_unrealized_pl += unrealized
 
         # Calculate stock P&L using FIFO matching
         stock_trades.sort(key=lambda x: x['timestamp'])
@@ -273,9 +290,7 @@ def calculate_pl_from_history():
             open_stock_positions += len(queue)
 
         total_realized_pl = options_pl + stocks_pl
-        # Unrealized: open options (premium) + open stocks (cost basis of open longs)
-        # Note: For open short options, premium received counts as unrealized profit
-        total_unrealized_pl = options_unrealized_pl  # Stocks would need current market prices
+        # total_unrealized_pl already calculated from portfolio API above
 
         result = {
             'total_realized_pl': total_realized_pl,
@@ -370,7 +385,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.2 (Realized: $3,756.14 cash P&L; Tax target: $3,693.32 with -$62.82 wash sale adjustment)'
+        'version': '3.3 (Unrealized P&L now uses portfolio cost basis; Realized: $3,827.36, Unrealized: -$17,666.79)'
     })
 
 @app.route('/api/debug/all_positions')
