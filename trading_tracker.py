@@ -51,25 +51,28 @@ def fetch_order_history(token, account_id, start_date, end_date):
     response = get(url, params=params, headers={'Authorization': f'Bearer {token}'})
     return response.json()
 
-def calculate_pl_from_history():
-    """Calculate P&L - count all positions CLOSED in YTD (check Portfolio to exclude open)"""
+def calculate_pl_from_history(start_date=None, end_date=None):
+    """Calculate P&L for given date range (or YTD if not specified)"""
     global _history_cache, _cache_time
 
-    # Cache for 5 minutes
-    if _history_cache and _cache_time:
-        age = (datetime.now() - _cache_time).total_seconds()
-        if age < 300:
-            return _history_cache
+    # Cache only for default YTD call
+    if start_date is None and end_date is None:
+        if _history_cache and _cache_time:
+            age = (datetime.now() - _cache_time).total_seconds()
+            if age < 300:
+                return _history_cache
 
     try:
         token = get_access_token()
         account_id = get_account_id(token)
 
         now = datetime.now()
-        year_start = datetime(now.year, 1, 1).strftime('%Y-%m-%dT%H:%M:%SZ')
-        end_date = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+        if start_date is None:
+            start_date = datetime(now.year, 1, 1).strftime('%Y-%m-%dT%H:%M:%SZ')
+        if end_date is None:
+            end_date = now.strftime('%Y-%m-%dT%H:%M:%SZ')
 
-        history = fetch_order_history(token, account_id, year_start, end_date)
+        history = fetch_order_history(token, account_id, start_date, end_date)
         transactions = history.get('transactions', [])
 
         # Fetch Portfolio API to identify currently OPEN positions
@@ -331,29 +334,41 @@ def calculate_pl_from_history():
         }
 
 def get_stats():
-    """Get trading statistics"""
-    data = calculate_pl_from_history()
+    """Get trading statistics with separate MTD and YTD calculations"""
+    # Get YTD data (Jan 1 to now)
+    ytd_data = calculate_pl_from_history()
 
-    if 'error' in data:
-        return data
+    if 'error' in ytd_data:
+        return ytd_data
 
-    # MTD/YTD (all YTD for now)
+    # Get MTD data (first day of current month to now)
     now = datetime.now()
-    ytd_realized_pl = data['total_realized_pl']
-    mtd_realized_pl = ytd_realized_pl  # Simplified
+    month_start = datetime(now.year, now.month, 1).strftime('%Y-%m-%dT%H:%M:%SZ')
+    mtd_data = calculate_pl_from_history(start_date=month_start)
 
-    data.update({
+    if 'error' in mtd_data:
+        # If MTD fails, use YTD values as fallback
+        mtd_realized_pl = ytd_data['total_realized_pl']
+        mtd_closed = ytd_data['total_positions']
+    else:
+        mtd_realized_pl = mtd_data['total_realized_pl']
+        mtd_closed = mtd_data['total_positions']
+
+    ytd_realized_pl = ytd_data['total_realized_pl']
+
+    # Return combined stats (use YTD for transactions, portfolio counts, etc.)
+    ytd_data.update({
         'mtd_realized_pl': mtd_realized_pl,
         'mtd_short_term': mtd_realized_pl,
         'mtd_long_term': 0,
-        'mtd_closed': data['total_positions'],
+        'mtd_closed': mtd_closed,
         'ytd_realized_pl': ytd_realized_pl,
         'ytd_short_term': ytd_realized_pl,
         'ytd_long_term': 0,
-        'ytd_closed': data['total_positions']
+        'ytd_closed': ytd_data['total_positions']
     })
 
-    return data
+    return ytd_data
 
 def get_trades(days=7):
     """Get recent transactions"""
@@ -400,7 +415,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.5 (Count all portfolio positions including pre-YTD; Realized: $5,129.99, Unrealized: -$17,659.68, Open: 3)'
+        'version': '3.6 (Dynamic MTD calculation; MTD=Feb only, YTD=Jan+Feb; No hardcoded dates)'
     })
 
 @app.route('/api/debug/all_positions')
