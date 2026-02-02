@@ -370,7 +370,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.2 (Unrealized P&L calculation added)'
+        'version': '3.2 (Realized: $3,756.14 cash P&L; Tax target: $3,693.32 with -$62.82 wash sale adjustment)'
     })
 
 @app.route('/api/debug/all_positions')
