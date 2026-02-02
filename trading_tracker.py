@@ -132,7 +132,10 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                 parts = description.split()
                 if len(parts) >= 3:
                     side = 'BUY' if 'BUY' in description else 'SELL'
-                    qty = int(parts[1]) if parts[1].isdigit() else 0
+                    try:
+                        qty = int(parts[1])
+                    except (ValueError, IndexError):
+                        qty = 0
                     symbol = parts[2]
                     stock_trades.append({
                         'symbol': symbol,
@@ -234,6 +237,86 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                 total_unrealized_pl += unrealized
 
         # Calculate stock P&L using FIFO matching
+        # Track assignment cost basis adjustments from short option assignments
+        # Format: {symbol: {quantity: shares, premium_total: float, strike: float, premium_per_share: float}}
+        assignment_adjustments = {}
+
+        # Analyze sell-only option groups to detect potential assignments (only in YTD)
+        for key, data in option_trades.items():
+            has_buy = data['buy'] != 0
+            has_sell = data['sell'] != 0
+
+            # If sell-only (short option), it may have been assigned
+            if has_sell and not has_buy:
+                # Parse contract details from transactions
+                for tx in data['transactions']:
+                    desc = tx['description']
+                    # Parse format: "SELL 20 SOXL260130P00065000 at 0.65"
+                    # Extract: quantity(20), symbol(SOXL260130P00065000), price(0.65)
+                    parts = desc.split()
+                    if len(parts) >= 4 and parts[0] == 'SELL':
+                        try:
+                            qty = int(parts[1])
+                            option_symbol = parts[2]
+                            price_str = parts[4].replace('$', '').replace(',', '')
+                            price = float(price_str)
+
+                            # Parse option symbol to get underlying and strike
+                            # Format: UNDERLYING(2)YYMMDD(C/P)STRIKE*1000
+                            m = re.match(r'([A-Z]+)2(\d{2})(\d{2})(\d{2})([CP])(\d{6})', option_symbol)
+                            if m:
+                                underlying = m.group(1)
+                                strike = int(m.group(6)) / 1000  # Convert from cents
+                                contracts = qty
+                                shares = contracts * 100
+                                premium = price * shares
+
+                                # Store assignment data
+                                if underlying not in assignment_adjustments:
+                                    assignment_adjustments[underlying] = {
+                                        'quantity': 0,
+                                        'premium_total': 0,
+                                        'strike': strike,
+                                        'premium_per_share': 0
+                                    }
+
+                                assignment_adjustments[underlying]['quantity'] += shares
+                                assignment_adjustments[underlying]['premium_total'] += premium
+                        except (ValueError, IndexError):
+                            continue
+
+        # Calculate premium per share for each assignment
+        for symbol in assignment_adjustments:
+            adj = assignment_adjustments[symbol]
+            if adj['quantity'] > 0:
+                adj['premium_per_share'] = adj['premium_total'] / adj['quantity']
+
+        # Build a map of portfolio cost basis for stock positions
+        # This helps detect assignments that happened before YTD
+        portfolio_cost_basis = {}
+        for pos in portfolio.get('positions', []):
+            instrument = pos.get('instrument', {})
+            inst_type = instrument.get('type', '')
+            if inst_type == 'EQUITY':
+                symbol = instrument.get('symbol', '')
+                cost_basis_dict = pos.get('costBasis', {})
+                if isinstance(cost_basis_dict, str):
+                    import ast
+                    try:
+                        cost_basis_dict = ast.literal_eval(cost_basis_dict)
+                    except:
+                        cost_basis_dict = {}
+
+                total_cost = float(cost_basis_dict.get('totalCost', 0))
+                quantity = float(pos.get('quantity', 0))
+
+                if quantity > 0 and total_cost > 0:
+                    portfolio_cost_basis[symbol] = {
+                        'total_cost': total_cost,
+                        'quantity': quantity,
+                        'cost_per_share': total_cost / quantity
+                    }
+
         stock_trades.sort(key=lambda x: x['timestamp'])
         stock_positions = {}
         stocks_pl = 0
@@ -246,11 +329,41 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                 stock_positions[symbol] = []
 
             if trade['side'] == 'BUY':
+                # Check if this BUY matches an assignment (quantity matches exactly)
+                amount = trade['amount']
+                original_amount = amount
+                cost_basis_from_portfolio = None
+
+                # First, check YTD assignment adjustments
+                if symbol in assignment_adjustments:
+                    adj = assignment_adjustments[symbol]
+                    # Match by exact quantity (assignment creates specific share count)
+                    if trade['quantity'] == adj['quantity']:
+                        # Adjust cost basis: original cost - premium received
+                        # This prevents double-counting the option premium
+                        cost_adjustment = adj['premium_total']
+                        amount = amount - cost_adjustment
+                        cost_basis_from_portfolio = 'ytd_assignment'
+
+                # Second, check if this BUY matches a portfolio position (pre-YTD assignment)
+                if cost_basis_from_portfolio is None and symbol in portfolio_cost_basis:
+                    pf = portfolio_cost_basis[symbol]
+                    # Check if the quantity matches exactly (assignment creates specific lot)
+                    if trade['quantity'] == pf['quantity']:
+                        # Use portfolio cost basis instead of transaction amount
+                        # The portfolio already includes the assignment adjustment
+                        amount = pf['total_cost']
+                        cost_basis_from_portfolio = 'portfolio'
+
                 stock_positions[symbol].append({
                     'quantity': trade['quantity'],
-                    'amount': trade['amount'],
+                    'amount': amount,
+                    'original_amount': original_amount,
                     'description': trade['description'],
-                    'timestamp': trade['timestamp']
+                    'timestamp': trade['timestamp'],
+                    'side': 'BUY',  # These are BUY positions for FIFO matching
+                    'cost_basis_source': cost_basis_from_portfolio,
+                    'original_quantity': trade['quantity']  # Preserve for completed_transactions
                 })
             else:
                 remaining_qty = trade['quantity']
@@ -262,8 +375,13 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     buy_amount_per_share = abs(buy_trade['amount'] / buy_trade['quantity'])
                     match_pl = (sell_amount_per_share - buy_amount_per_share) * match_qty
                     stocks_pl += match_pl
-                    completed_transactions.append(buy_trade)
+
+                    # Add copies with preserved quantities to completed_transactions
+                    buy_copy = buy_trade.copy()
+                    buy_copy['quantity'] = buy_trade.get('original_quantity', match_qty)
+                    completed_transactions.append(buy_copy)
                     completed_transactions.append(trade)
+
                     remaining_qty -= match_qty
                     buy_trade['quantity'] -= match_qty
 
@@ -415,8 +533,251 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.6 (Dynamic MTD calculation; MTD=Feb only, YTD=Jan+Feb; No hardcoded dates)'
+        'version': '3.8 (FIX: BUY trades now show correct quantities and side in transactions - FIFO matching preserves original_quantity)'
     })
+
+@app.route('/api/debug/stock_trades')
+def debug_stock_trades():
+    """Debug endpoint to trace through stock FIFO matching with assignment adjustments"""
+    try:
+        token = get_access_token()
+        account_id = get_account_id(token)
+
+        now = datetime.now()
+        year_start = datetime(now.year, 1, 1).strftime('%Y-%m-%dT%H:%M:%SZ')
+        end_date = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        history = fetch_order_history(token, account_id, year_start, end_date)
+        transactions = history.get('transactions', [])
+
+        # Get portfolio
+        portfolio_response = get(
+            f'https://api.public.com/userapigateway/trading/{account_id}/portfolio',
+            headers={'Authorization': f'Bearer {token}'}
+        )
+        portfolio = portfolio_response.json()
+
+        # Check for stock symbols in portfolio
+        stock_symbols_in_portfolio = set()
+        if 'positions' in portfolio:
+            for pos in portfolio['positions']:
+                instrument = pos.get('instrument', {})
+                symbol = instrument.get('symbol', '')
+                inst_type = instrument.get('type', '')
+                if inst_type == 'EQUITY':
+                    stock_symbols_in_portfolio.add(symbol)
+
+        # Parse option trades to find assignments
+        option_trades = {}
+        for tx in transactions:
+            tx_type = tx.get('type', '')
+            sub_type = tx.get('subType', '')
+            if tx_type != 'TRADE' or sub_type != 'TRADE':
+                continue
+
+            net_amount = float(tx.get('netAmount') or 0)
+            description = tx.get('description', '')
+            timestamp = tx.get('timestamp', '')
+
+            match = re.search(r'([A-Z]+2\d{2}\d{3}[CP]\d{8})', description)
+            if match:
+                contract = match.group(1)
+                m2 = re.match(r'([A-Z]+)(\d{6})([CP])(\d{8})', contract)
+                if m2:
+                    key = f"{m2.group(1)}_{m2.group(2)}"
+                else:
+                    key = contract
+
+                if key not in option_trades:
+                    option_trades[key] = {'buy': 0, 'sell': 0, 'transactions': []}
+
+                if 'BUY' in description:
+                    option_trades[key]['buy'] += net_amount
+                else:
+                    option_trades[key]['sell'] += net_amount
+
+                option_trades[key]['transactions'].append({
+                    'description': description,
+                    'netAmount': net_amount,
+                    'timestamp': timestamp
+                })
+
+        # Detect assignment adjustments
+        assignment_adjustments = {}
+        for key, data in option_trades.items():
+            has_buy = data['buy'] != 0
+            has_sell = data['sell'] != 0
+
+            if has_sell and not has_buy:
+                for tx in data['transactions']:
+                    desc = tx['description']
+                    parts = desc.split()
+                    if len(parts) >= 4 and parts[0] == 'SELL':
+                        try:
+                            qty = int(parts[1])
+                            option_symbol = parts[2]
+                            price_str = parts[4].replace('$', '').replace(',', '')
+                            price = float(price_str)
+
+                            m = re.match(r'([A-Z]+)2(\d{2})(\d{2})(\d{2})([CP])(\d{6})', option_symbol)
+                            if m:
+                                underlying = m.group(1)
+                                strike = int(m.group(6)) / 1000
+                                contracts = qty
+                                shares = contracts * 100
+                                premium = price * shares
+
+                                if underlying not in assignment_adjustments:
+                                    assignment_adjustments[underlying] = {
+                                        'quantity': 0,
+                                        'premium_total': 0,
+                                        'strike': strike,
+                                        'premium_per_share': 0,
+                                        'source_tx': desc
+                                    }
+
+                                assignment_adjustments[underlying]['quantity'] += shares
+                                assignment_adjustments[underlying]['premium_total'] += premium
+                        except (ValueError, IndexError) as e:
+                            continue
+
+        # Calculate premium per share
+        for symbol in assignment_adjustments:
+            adj = assignment_adjustments[symbol]
+            if adj['quantity'] > 0:
+                adj['premium_per_share'] = adj['premium_total'] / adj['quantity']
+
+        # Parse stock trades
+        stock_trades = []
+        for tx in transactions:
+            tx_type = tx.get('type', '')
+            sub_type = tx.get('subType', '')
+            if tx_type != 'TRADE' or sub_type != 'TRADE':
+                continue
+
+            net_amount = float(tx.get('netAmount') or 0)
+            description = tx.get('description', '')
+            timestamp = tx.get('timestamp', '')
+
+            # Skip options
+            if re.search(r'([A-Z]+2\d{2}\d{3}[CP]\d{8})', description):
+                continue
+
+            parts = description.split()
+            if len(parts) >= 3 and ('BUY' in description or 'SELL' in description):
+                side = 'BUY' if 'BUY' in description else 'SELL'
+                try:
+                    qty = int(parts[1])
+                except:
+                    continue
+                symbol = parts[2]
+
+                amount = net_amount
+                original_amount = amount
+                cost_adjustment = 0
+                adjusted = False
+
+                # Apply assignment adjustment
+                if side == 'BUY' and symbol in assignment_adjustments:
+                    adj = assignment_adjustments[symbol]
+                    if qty == adj['quantity']:
+                        cost_adjustment = adj['premium_total']
+                        amount = amount - cost_adjustment
+                        adjusted = True
+
+                stock_trades.append({
+                    'symbol': symbol,
+                    'side': side,
+                    'quantity': qty,
+                    'amount': amount,
+                    'original_amount': original_amount,
+                    'cost_adjustment': cost_adjustment,
+                    'adjusted': adjusted,
+                    'timestamp': timestamp,
+                    'description': description
+                })
+
+        # Sort by timestamp
+        stock_trades.sort(key=lambda x: x['timestamp'])
+
+        # FIFO matching
+        stock_positions = {}
+        fifo_log = []
+        stocks_pl = 0
+
+        for trade in stock_trades:
+            symbol = trade['symbol']
+            if symbol not in stock_positions:
+                stock_positions[symbol] = []
+
+            log_entry = {
+                'trade': trade,
+                'action': 'added_to_queue' if trade['side'] == 'BUY' else 'matching',
+                'before_queue': len(stock_positions.get(symbol, [])),
+                'matches': []
+            }
+
+            if trade['side'] == 'BUY':
+                stock_positions[symbol].append(trade)
+                log_entry['after_queue'] = len(stock_positions[symbol])
+            else:
+                remaining_qty = trade['quantity']
+                sell_price = abs(trade['amount'] / trade['quantity']) if trade['quantity'] > 0 else 0
+
+                while remaining_qty > 0 and stock_positions[symbol]:
+                    buy_trade = stock_positions[symbol][0]
+                    match_qty = min(remaining_qty, buy_trade['quantity'])
+                    buy_price = abs(buy_trade['amount'] / buy_trade['quantity']) if buy_trade['quantity'] > 0 else 0
+                    match_pl = (sell_price - buy_price) * match_qty
+                    stocks_pl += match_pl
+
+                    log_entry['matches'].append({
+                        'match_qty': match_qty,
+                        'sell_price': sell_price,
+                        'buy_price': buy_price,
+                        'match_pl': match_pl,
+                        'buy_description': buy_trade['description']
+                    })
+
+                    remaining_qty -= match_qty
+                    buy_trade['quantity'] -= match_qty
+
+                    if buy_trade['quantity'] == 0:
+                        stock_positions[symbol].pop(0)
+
+                if remaining_qty > 0:
+                    log_entry['unmatched'] = remaining_qty
+
+            log_entry['after_queue'] = len(stock_positions.get(symbol, []))
+            fifo_log.append(log_entry)
+
+        # Show remaining open positions
+        open_positions = {}
+        for symbol, queue in stock_positions.items():
+            if queue:
+                open_positions[symbol] = [
+                    {
+                        'quantity': t['quantity'],
+                        'amount': t['amount'],
+                        'original_amount': t.get('original_amount', t['amount']),
+                        'cost_adjustment': t.get('cost_adjustment', 0),
+                        'description': t['description']
+                    }
+                    for t in queue
+                ]
+
+        return jsonify({
+            'assignment_adjustments': assignment_adjustments,
+            'stock_symbols_in_portfolio': list(stock_symbols_in_portfolio),
+            'stock_trades': stock_trades,
+            'fifo_log': fifo_log,
+            'open_positions': open_positions,
+            'stocks_pl': stocks_pl
+        })
+
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
 
 @app.route('/api/debug/all_positions')
 def debug_all_positions():
