@@ -181,18 +181,8 @@ def calculate_pl_from_history():
                 if underlying in stock_symbols_in_portfolio:
                     data['any_in_portfolio'] = True  # Mark as "open" since stock position is open
 
-        # Manually mark groups as open that should be excluded from realized P&L
-        # NOTE: USO_260206 and XLE_260306 are now CLOSED (both legs traded, not in portfolio)
-        # SOXL_260130 was assigned to stock - exclude from realized P&L
-        # NFLX_260320 remains open (both legs still in portfolio)
-        open_groups_to_exclude = [
-            'NFLX_260320',  # Both legs still open in portfolio
-            'SOXL_260130',  # Assigned to SOXL stock (exclude premium from realized P&L)
-        ]
-
-        for key in option_trades:
-            if key in open_groups_to_exclude:
-                option_trades[key]['any_in_portfolio'] = True
+        # NO HARDCODED POSITIONS - rely entirely on portfolio API check above
+        # The portfolio check correctly identifies which positions are still open
 
         # Calculate options P&L (realized only)
         options_pl = 0
@@ -385,7 +375,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.3 (Unrealized P&L now uses portfolio cost basis; Realized: $3,827.36, Unrealized: -$17,666.79)'
+        'version': '3.4 (No hardcoded positions; All detection dynamic via Portfolio API; Realized: $5,129.99, Unrealized: -$17,701.79)'
     })
 
 @app.route('/api/debug/all_positions')
