@@ -154,13 +154,79 @@
         }
 
         async function loadChartData(transactions) {
-            // Group by date for cumulative P&L
-            const dailyPl = {};
+            // Group transactions by position to find closing dates
+            // For options: group by underlying/expiry
+            // For stocks: group by symbol
+            const optionPositions = {};  // key -> {transactions: [], closing_date: null}
+            const stockPositions = {};   // symbol -> {transactions: [], closing_date: null}
+
             for (const tx of transactions) {
-                const amount = parseFloat(tx.netAmount || 0);
-                if (amount !== 0) {
-                    const date = new Date(tx.timestamp || Date.now()).toLocaleDateString();
-                    dailyPl[date] = (dailyPl[date] || 0) + amount;
+                const desc = tx.description || '';
+                const timestamp = tx.timestamp || '';
+                const netAmount = parseFloat(tx.netAmount || 0);
+
+                // Check if it's an option transaction
+                const optionMatch = desc.match(/([A-Z]+2\d{2}\d{3}[CP]\d{8})/);
+                if (optionMatch) {
+                    // Extract underlying and expiry for grouping
+                    const m = optionMatch[1].match(/([A-Z]+)(\d{6})([CP])(\d{8})/);
+                    let key;
+                    if (m) {
+                        key = `${m[1]}_${m[2]}`;  // underlying_expiry
+                    } else {
+                        key = optionMatch[1];
+                    }
+
+                    if (!optionPositions[key]) {
+                        optionPositions[key] = { transactions: [], totalPl: 0 };
+                    }
+                    optionPositions[key].transactions.push(tx);
+                    optionPositions[key].totalPl += netAmount;
+                    // Update closing date (latest timestamp for this position)
+                    if (timestamp) {
+                        if (!optionPositions[key].closing_date || timestamp > optionPositions[key].closing_date) {
+                            optionPositions[key].closing_date = timestamp;
+                        }
+                    }
+                } else {
+                    // Stock transaction - group by symbol
+                    const parts = desc.split(' ');
+                    if (parts.length >= 3) {
+                        const symbol = parts[2];
+                        if (!stockPositions[symbol]) {
+                            stockPositions[symbol] = { transactions: [], totalPl: 0, tradeCount: 0 };
+                        }
+                        stockPositions[symbol].transactions.push(tx);
+                        stockPositions[symbol].totalPl += netAmount;
+                        stockPositions[symbol].tradeCount += 1;
+                        // Update closing date (latest timestamp for this symbol)
+                        if (timestamp) {
+                            if (!stockPositions[symbol].closing_date || timestamp > stockPositions[symbol].closing_date) {
+                                stockPositions[symbol].closing_date = timestamp;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Group P&L by closing date
+            const dailyPl = {};
+
+            // For options: add full P&L on closing date
+            for (const key of Object.keys(optionPositions)) {
+                const pos = optionPositions[key];
+                if (pos.closing_date) {
+                    const date = new Date(pos.closing_date).toLocaleDateString();
+                    dailyPl[date] = (dailyPl[date] || 0) + pos.totalPl;
+                }
+            }
+
+            // For stocks: add full P&L on closing date
+            for (const symbol of Object.keys(stockPositions)) {
+                const pos = stockPositions[symbol];
+                if (pos.closing_date) {
+                    const date = new Date(pos.closing_date).toLocaleDateString();
+                    dailyPl[date] = (dailyPl[date] || 0) + pos.totalPl;
                 }
             }
 

@@ -607,7 +607,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.9 (FIX: MTD calculation now shows P&L of positions closed in current month, not just transactions in current month)'
+        'version': '3.10 (FIX: Cumulative P&L chart now shows full position P&L on closing date, not spread across transaction dates)'
     })
 
 @app.route('/api/debug/stock_trades')
