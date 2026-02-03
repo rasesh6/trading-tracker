@@ -263,7 +263,7 @@ def calculate_pl_from_history(start_date=None, end_date=None):
 
                             # Parse option symbol to get underlying and strike
                             # Format: UNDERLYING(2)YYMMDD(C/P)STRIKE*1000
-                            m = re.match(r'([A-Z]+)2(\d{2})(\d{2})(\d{2})([CP])(\d{6})', option_symbol)
+                            m = re.match(r'([A-Z]+)2(\d{2})(\d{2})(\d{2})([CP])(\d{8})', option_symbol)
                             if m:
                                 underlying = m.group(1)
                                 strike = int(m.group(6)) / 1000  # Convert from cents
@@ -562,7 +562,7 @@ def get_stats():
         'ytd_realized_pl': ytd_realized_pl,
         'ytd_short_term': ytd_realized_pl,
         'ytd_long_term': 0,
-        'ytd_closed': ytd_data['total_positions']
+        'ytd_closed': ytd_data['total_positions'] - ytd_data['open_positions']
     })
 
     return ytd_data
@@ -612,7 +612,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.12 (FIX: MTD calculation now uses UTC timezone consistently)'
+        'version': '3.13 (FIX: Assignment adjustment regex now correctly uses 8 digits for strike price)'
     })
 
 @app.route('/api/debug/stock_trades')
@@ -698,7 +698,7 @@ def debug_stock_trades():
                             price_str = parts[4].replace('$', '').replace(',', '')
                             price = float(price_str)
 
-                            m = re.match(r'([A-Z]+)2(\d{2})(\d{2})(\d{2})([CP])(\d{6})', option_symbol)
+                            m = re.match(r'([A-Z]+)2(\d{2})(\d{2})(\d{2})([CP])(\d{8})', option_symbol)
                             if m:
                                 underlying = m.group(1)
                                 strike = int(m.group(6)) / 1000
