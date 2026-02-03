@@ -175,20 +175,12 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                             data['any_in_portfolio'] = True
                             break
 
-        # Check for sell-only options that might have been assigned to stock
-        for key, data in option_trades.items():
-            has_buy = data['buy'] != 0
-            has_sell = data['sell'] != 0
-
-            # If it's sell-only and the underlying stock is in portfolio, it was likely assigned
-            if has_sell and not has_buy:
-                # Extract underlying symbol from key
-                underlying = key.split('_')[0] if '_' in key else key[:key.index('2')]
-                if underlying in stock_symbols_in_portfolio:
-                    data['any_in_portfolio'] = True  # Mark as "open" since stock position is open
-
-        # NO HARDCODED POSITIONS - rely entirely on portfolio API check above
-        # The portfolio check correctly identifies which positions are still open
+        # FIXED: Do NOT mark expired options as "open" just because underlying stock exists
+        # The portfolio check at lines 165-176 already correctly identifies which option
+        # contracts are still in portfolio. Expired options that are NOT in portfolio
+        # should be counted as CLOSED with realized P&L, regardless of underlying stock.
+        # This bug was causing expired options like SOXL260130P00065000 (+$1302.63)
+        # to be incorrectly excluded from realized P&L.
 
         # Calculate options P&L (realized only)
         options_pl = 0
@@ -854,6 +846,63 @@ def debug_stock_trades():
             'stocks_pl': stocks_pl
         })
 
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
+
+@app.route('/api/debug/raw_history')
+def debug_raw_history():
+    """Debug endpoint to show raw Public API history transactions"""
+    try:
+        token = get_access_token()
+        account_id = get_account_id(token)
+
+        now = datetime.now()
+        year_start = datetime(now.year, 1, 1).strftime('%Y-%m-%dT%H:%M:%SZ')
+        end_date = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        # Fetch raw History API
+        history = fetch_order_history(token, account_id, year_start, end_date)
+        all_transactions = history.get('transactions', [])
+
+        # Filter to only TRADE transactions
+        trade_transactions = []
+        for tx in all_transactions:
+            tx_type = tx.get('type', '')
+            sub_type = tx.get('subType', '')
+            if tx_type == 'TRADE' and sub_type == 'TRADE':
+                trade_transactions.append(tx)
+
+        # Group by symbol/contract
+        by_symbol = {}
+        for tx in trade_transactions:
+            desc = tx.get('description', '')
+            net_amount = float(tx.get('netAmount') or 0)
+
+            # Try to match option
+            match = re.search(r'([A-Z]+2\d{2}\d{3}[CP]\d{8})', desc)
+            if match:
+                key = match.group(1)
+            else:
+                # Stock
+                parts = desc.split()
+                key = parts[2] if len(parts) > 2 else 'UNKNOWN'
+
+            if key not in by_symbol:
+                by_symbol[key] = {'buy': 0, 'sell': 0, 'count': 0, 'txs': []}
+            if 'BUY' in desc:
+                by_symbol[key]['buy'] += net_amount
+            else:
+                by_symbol[key]['sell'] += net_amount
+            by_symbol[key]['count'] += 1
+            by_symbol[key]['txs'].append({'desc': desc[:60], 'amount': net_amount})
+
+        return jsonify({
+            'total_transactions': len(all_transactions),
+            'trade_transactions': len(trade_transactions),
+            'by_symbol': by_symbol,
+            'all_trade_txs': [{'desc': tx.get('description', '')[:80], 'amount': float(tx.get('netAmount', 0))} for tx in trade_transactions]
+        })
     except Exception as e:
         import traceback
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
