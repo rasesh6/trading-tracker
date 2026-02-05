@@ -275,18 +275,19 @@ def calculate_pl_from_history(start_date=None, end_date=None):
 
             # Count as CLOSED if:
             # 1. Both buy and sell in YTD, OR
-            # 2. Only buy or only sell BUT NOT in portfolio
-            # NOTE: Assigned options ARE counted as closed (premium is actual cash received)
-            # The stock P&L will use the ORIGINAL cost basis (strike price) without adjustment
-            if not is_in_portfolio:
-                # Position is closed (both sides in YTD, expired, or assigned)
+            # 2. Only buy or only sell BUT NOT in portfolio AND not assigned to stock
+            # NOTE: Assigned options are NOT counted here - their P&L will be included when stock is sold
+            if not is_in_portfolio and not is_assigned:
+                # Position is closed (both sides in YTD, or expired)
                 options_pl += data['buy'] + data['sell']
                 completed_transactions.extend(data['transactions'])
                 if has_buy or has_sell:
                     closed_option_positions += 1
             elif is_in_portfolio:
-                # Still open in portfolio
+                # Still open in portfolio (or assigned to stock that's still open)
                 open_option_positions += 1
+            # Note: is_assigned options are simply skipped here
+            # They will be counted in the stock P&L when the stock is sold
 
         # Calculate unrealized P&L from portfolio API (using cost basis)
         total_unrealized_pl = 0
@@ -348,16 +349,29 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                 stock_positions[symbol] = []
 
             if trade['side'] == 'BUY':
+                # Check if this BUY matches an assignment
                 amount = trade['amount']
                 original_amount = amount
                 cost_basis_from_portfolio = None
 
-                # Check if this BUY matches a portfolio position (pre-YTD assignment)
+                # Check assignments for this symbol
+                if symbol in assignments_by_symbol:
+                    for adj in assignments_by_symbol[symbol]:
+                        # Match by exact quantity
+                        if trade['quantity'] == adj['quantity']:
+                            # Adjust cost basis by premium received
+                            cost_adjustment = adj['premium_total']
+                            amount = amount + cost_adjustment  # Add premium to reduce negative amount
+                            cost_basis_from_portfolio = 'ytd_assignment'
+                            break  # Use first matching assignment
+
+                # Second, check if this BUY matches a portfolio position (pre-YTD assignment)
                 if cost_basis_from_portfolio is None and symbol in portfolio_cost_basis:
                     pf = portfolio_cost_basis[symbol]
                     # Check if the quantity matches exactly (assignment creates specific lot)
                     if trade['quantity'] == pf['quantity']:
                         # Use portfolio cost basis instead of transaction amount
+                        # The portfolio already includes the assignment adjustment
                         amount = pf['total_cost']
                         cost_basis_from_portfolio = 'portfolio'
 
@@ -382,9 +396,22 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     match_pl = (sell_amount_per_share - buy_amount_per_share) * match_qty
                     stocks_pl += match_pl
 
+                    # Check if this stock position came from an assignment
+                    # Cost basis was already reduced by premium, so no additional calculation needed
+                    assignment_premium = 0
+                    if buy_trade.get('cost_basis_source') == 'ytd_assignment' and symbol in assignments_by_symbol:
+                        # Find the matching assignment
+                        for adj in assignments_by_symbol[symbol]:
+                            if buy_trade['quantity'] == adj['quantity']:
+                                premium_ratio = match_qty / adj['quantity']
+                                assignment_premium = adj['premium_total'] * premium_ratio
+                                break
+
                     # Add synthetic P&L transaction with closing date for chart
                     # This ensures stock P&L is included in cumulative chart
                     description = f'Stock P&L: {symbol} {match_qty} shares'
+                    if assignment_premium > 0:
+                        description += f' (includes assignment premium ${assignment_premium:.2f})'
 
                     completed_transactions.append({
                         'netAmount': match_pl,
@@ -472,90 +499,29 @@ def get_stats():
         return ytd_data
 
     # Calculate MTD based on positions that CLOSED in the current month
-    # not transactions that occurred in the current month
-    # Use UTC consistently to avoid timezone mismatches (server runs in UTC)
+    # Each transaction in completed_transactions represents a closed position
+    # Use the transaction's timestamp as the closing date
     now = datetime.now(timezone.utc)
     current_month = now.month
     current_year = now.year
 
-    # Group completed transactions by position to find closing dates
-    # For options: group by underlying/expiry (key format: "UNDERLYING_YYMMDD")
-    # For stocks: FIFO pairs are already matched in completed_transactions
     mtd_realized_pl = 0
     mtd_closed = 0
 
     transactions = ytd_data.get('transactions', [])
 
-    # Group transactions to identify positions and their closing dates
-    option_positions = {}  # key -> {transactions: [], closing_date: None}
-    stock_positions = {}   # symbol -> {transactions: [], closing_date: None}
-
+    # Simply sum all transactions that closed in the current month
+    # Each transaction already represents a complete closed position
     for tx in transactions:
-        desc = tx.get('description', '')
         timestamp = tx.get('timestamp', '')
         net_amount = tx.get('netAmount', 0)
 
-        # Check if it's an option transaction
-        option_match = re.search(r'([A-Z]+2\d{2}\d{3}[CP]\d{8})', desc)
-        if option_match:
-            # Extract underlying and expiry for grouping
-            m = re.match(r'([A-Z]+)(\d{6})([CP])(\d{8})', option_match.group(1))
-            if m:
-                key = f"{m.group(1)}_{m.group(2)}"  # underlying_expiry
-            else:
-                key = option_match.group(1)
-
-            if key not in option_positions:
-                option_positions[key] = {'transactions': [], 'total_pl': 0}
-            option_positions[key]['transactions'].append(tx)
-            option_positions[key]['total_pl'] += net_amount
-            # Update closing date (latest timestamp for this position)
-            if timestamp:
-                if option_positions[key].get('closing_date') is None or timestamp > option_positions[key]['closing_date']:
-                    option_positions[key]['closing_date'] = timestamp
-        else:
-            # Stock transaction - group by symbol
-            # Extract symbol from description (e.g., "BUY 100 SOXL")
-            parts = desc.split()
-            if len(parts) >= 3:
-                symbol = parts[2]
-                if symbol not in stock_positions:
-                    stock_positions[symbol] = {'transactions': [], 'total_pl': 0, 'trade_count': 0}
-                stock_positions[symbol]['transactions'].append(tx)
-                stock_positions[symbol]['total_pl'] += net_amount
-                stock_positions[symbol]['trade_count'] += 1
-                # Update closing date (latest timestamp for this symbol)
-                if timestamp:
-                    if stock_positions[symbol].get('closing_date') is None or timestamp > stock_positions[symbol]['closing_date']:
-                        stock_positions[symbol]['closing_date'] = timestamp
-
-    # Sum P&L for positions that closed in current month
-    # For options: each key is a position
-    for key, pos_data in option_positions.items():
-        closing_date = pos_data.get('closing_date')
-        if closing_date:
+        if timestamp:
             try:
-                # Parse timestamp like "2026-02-02T15:30:00Z"
-                dt = datetime.fromisoformat(closing_date.replace('Z', '+00:00'))
+                dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
                 if dt.month == current_month and dt.year == current_year:
-                    mtd_realized_pl += pos_data['total_pl']
+                    mtd_realized_pl += net_amount
                     mtd_closed += 1
-            except:
-                pass
-
-    # For stocks: each FIFO pair closed in current month
-    # Stocks are matched as BUY+SELL pairs, so we count positions closed
-    for symbol, pos_data in stock_positions.items():
-        closing_date = pos_data.get('closing_date')
-        if closing_date:
-            try:
-                dt = datetime.fromisoformat(closing_date.replace('Z', '+00:00'))
-                if dt.month == current_month and dt.year == current_year:
-                    # For stocks, trade_count should be even (BUY+SELL pairs)
-                    # Each pair is one position
-                    pairs = pos_data['trade_count'] // 2
-                    mtd_realized_pl += pos_data['total_pl']
-                    mtd_closed += pairs
             except:
                 pass
 
@@ -620,7 +586,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.16 (FIX: Count assigned options as closed P&L - premium IS actual cash. Stock P&L uses original cost basis without premium adjustment)'
+        'version': '3.19 (FIX: MTD simplified to use transaction timestamps directly. No more regrouping which caused USO Jan+Feb trades to be lumped together)'
     })
 
 @app.route('/api/debug/stock_trades')
