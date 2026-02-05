@@ -268,6 +268,11 @@ def calculate_pl_from_history(start_date=None, end_date=None):
             has_sell = data['sell'] != 0
             is_in_portfolio = data['in_portfolio']
 
+            # CRITICAL: Exclude assigned options from options P&L
+            # Assigned options create stock positions and are accounted for in stock P&L
+            if contract in assigned_option_keys:
+                continue  # Skip this contract - it's handled in stock P&L
+
             # Count as CLOSED if:
             # 1. Both buy and sell in YTD, OR
             # 2. Only buy or only sell BUT NOT in portfolio (expired/worthless or closed early)
