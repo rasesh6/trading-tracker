@@ -71,7 +71,8 @@ def calculate_pl_from_history(start_date=None, end_date=None):
         if start_date is None:
             start_date = datetime(now.year, 1, 1).strftime('%Y-%m-%dT%H:%M:%SZ')
         if end_date is None:
-            end_date = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+            # Use end of current day (23:59:59 UTC) to capture all transactions today
+            end_date = datetime(now.year, now.month, now.day, 23, 59, 59).strftime('%Y-%m-%dT%H:%M:%SZ')
 
         history = fetch_order_history(token, account_id, start_date, end_date)
         transactions = history.get('transactions', [])
@@ -583,7 +584,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.21 (FIX: Exclude assigned options from options P&L. Assigned options create stock positions and are accounted for in stock P&L with adjusted cost basis. This prevents double-counting the premium.)'
+        'version': '3.22 (FIX: Use end-of-day UTC as end time for history queries. Previously used current time which missed same-day transactions. Now captures all transactions through 23:59:59 UTC. SOXL Feb 6 puts now correctly included: +$582.69)'
     })
 
 @app.route('/api/debug/stock_trades')
