@@ -275,19 +275,18 @@ def calculate_pl_from_history(start_date=None, end_date=None):
 
             # Count as CLOSED if:
             # 1. Both buy and sell in YTD, OR
-            # 2. Only buy or only sell BUT NOT in portfolio AND not assigned to stock
-            # NOTE: Assigned options are NOT counted here - their P&L will be included when stock is sold
-            if not is_in_portfolio and not is_assigned:
-                # Position is closed (both sides in YTD, or expired)
+            # 2. Only buy or only sell BUT NOT in portfolio
+            # NOTE: Assigned options ARE counted as closed (premium is actual cash received)
+            # The stock P&L will use the ORIGINAL cost basis (strike price) without adjustment
+            if not is_in_portfolio:
+                # Position is closed (both sides in YTD, expired, or assigned)
                 options_pl += data['buy'] + data['sell']
                 completed_transactions.extend(data['transactions'])
                 if has_buy or has_sell:
                     closed_option_positions += 1
             elif is_in_portfolio:
-                # Still open in portfolio (or assigned to stock that's still open)
+                # Still open in portfolio
                 open_option_positions += 1
-            # Note: is_assigned options are simply skipped here
-            # They will be counted in the stock P&L when the stock is sold
 
         # Calculate unrealized P&L from portfolio API (using cost basis)
         total_unrealized_pl = 0
@@ -349,29 +348,16 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                 stock_positions[symbol] = []
 
             if trade['side'] == 'BUY':
-                # Check if this BUY matches an assignment
                 amount = trade['amount']
                 original_amount = amount
                 cost_basis_from_portfolio = None
 
-                # Check assignments for this symbol
-                if symbol in assignments_by_symbol:
-                    for adj in assignments_by_symbol[symbol]:
-                        # Match by exact quantity
-                        if trade['quantity'] == adj['quantity']:
-                            # Adjust cost basis by premium received
-                            cost_adjustment = adj['premium_total']
-                            amount = amount + cost_adjustment  # Add premium to reduce negative amount
-                            cost_basis_from_portfolio = 'ytd_assignment'
-                            break  # Use first matching assignment
-
-                # Second, check if this BUY matches a portfolio position (pre-YTD assignment)
+                # Check if this BUY matches a portfolio position (pre-YTD assignment)
                 if cost_basis_from_portfolio is None and symbol in portfolio_cost_basis:
                     pf = portfolio_cost_basis[symbol]
                     # Check if the quantity matches exactly (assignment creates specific lot)
                     if trade['quantity'] == pf['quantity']:
                         # Use portfolio cost basis instead of transaction amount
-                        # The portfolio already includes the assignment adjustment
                         amount = pf['total_cost']
                         cost_basis_from_portfolio = 'portfolio'
 
@@ -396,22 +382,9 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     match_pl = (sell_amount_per_share - buy_amount_per_share) * match_qty
                     stocks_pl += match_pl
 
-                    # Check if this stock position came from an assignment
-                    # Cost basis was already reduced by premium, so no additional calculation needed
-                    assignment_premium = 0
-                    if buy_trade.get('cost_basis_source') == 'ytd_assignment' and symbol in assignments_by_symbol:
-                        # Find the matching assignment
-                        for adj in assignments_by_symbol[symbol]:
-                            if buy_trade['quantity'] == adj['quantity']:
-                                premium_ratio = match_qty / adj['quantity']
-                                assignment_premium = adj['premium_total'] * premium_ratio
-                                break
-
                     # Add synthetic P&L transaction with closing date for chart
                     # This ensures stock P&L is included in cumulative chart
                     description = f'Stock P&L: {symbol} {match_qty} shares'
-                    if assignment_premium > 0:
-                        description += f' (cost basis reduced by assignment premium ${assignment_premium:.2f})'
 
                     completed_transactions.append({
                         'netAmount': match_pl,
@@ -647,7 +620,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.15 (FIX: Correct assignment matching by specific option contract, not lumping all options together)'
+        'version': '3.16 (FIX: Count assigned options as closed P&L - premium IS actual cash. Stock P&L uses original cost basis without premium adjustment)'
     })
 
 @app.route('/api/debug/stock_trades')
