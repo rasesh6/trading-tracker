@@ -583,7 +583,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.20 (FIX: Track each option contract by FULL OCC symbol, not grouped. NFLX260320P00074000 and NFLX260320P00080000 tracked separately. Closed contracts now included even if other contracts with same expiry are open.)'
+        'version': '3.21 (FIX: Exclude assigned options from options P&L. Assigned options create stock positions and are accounted for in stock P&L with adjusted cost basis. This prevents double-counting the premium.)'
     })
 
 @app.route('/api/debug/stock_trades')
