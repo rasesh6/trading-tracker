@@ -9,6 +9,7 @@ Uses Public.com History API for exact P&L calculation.
 import os
 import json
 import re
+import copy
 from datetime import datetime, timedelta, timezone
 from flask import Flask, jsonify, send_file, request
 from requests import post, get
@@ -159,7 +160,7 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                 instrument = pos.get('instrument', {})
                 symbol = instrument.get('symbol', '')
                 # Check if it's a stock (not an option)
-                if not re.match(r'[A-Z]+2\d{2}\d{3}[CP]\d{8}', symbol):
+                if not re.match(r'[A-Z]+2\d{6}[CP]\d{8}', symbol):
                     stock_symbols_in_portfolio.add(symbol)
 
         if 'positions' in portfolio:
@@ -182,56 +183,12 @@ def calculate_pl_from_history(start_date=None, end_date=None):
         # This bug was causing expired options like SOXL260130P00065000 (+$1302.63)
         # to be incorrectly excluded from realized P&L.
 
-        # Calculate options P&L (realized only)
-        options_pl = 0
-        completed_transactions = []
-        closed_option_positions = 0
-        open_option_positions = 0
-
-        for key, data in option_trades.items():
-            has_buy = data['buy'] != 0
-            has_sell = data['sell'] != 0
-            is_in_portfolio = data['any_in_portfolio']
-
-            # Count as CLOSED if:
-            # 1. Both buy and sell in YTD, OR
-            # 2. Only buy or only sell BUT NOT in portfolio AND not assigned to stock
-            if not is_in_portfolio:
-                # Position is closed (both sides in YTD, or expired/assignment)
-                options_pl += data['buy'] + data['sell']
-                completed_transactions.extend(data['transactions'])
-                if has_buy or has_sell:
-                    closed_option_positions += 1
-            else:
-                # Still open in portfolio (or assigned to stock that's still open)
-                open_option_positions += 1
-
-        # Calculate unrealized P&L from portfolio API (using cost basis)
-        total_unrealized_pl = 0
-        if 'positions' in portfolio:
-            for pos in portfolio['positions']:
-                current_value = float(pos.get('currentValue', 0))
-                cost_basis_dict = pos.get('costBasis', {})
-
-                # Parse cost basis (it's a string representation of dict)
-                if isinstance(cost_basis_dict, str):
-                    import ast
-                    try:
-                        cost_basis_dict = ast.literal_eval(cost_basis_dict)
-                    except:
-                        cost_basis_dict = {}
-
-                total_cost = float(cost_basis_dict.get('totalCost', 0))
-
-                # Unrealized P&L = current value - cost basis
-                # For short positions (negative quantity): cost is negative, so (value - cost) works correctly
-                unrealized = current_value - total_cost
-                total_unrealized_pl += unrealized
-
-        # Calculate stock P&L using FIFO matching
+        # FIRST: Calculate assignment adjustments (needed for options P&L exclusion)
         # Track assignment cost basis adjustments from short option assignments
-        # Format: {symbol: {quantity: shares, premium_total: float, strike: float, premium_per_share: float}}
+        # Format: {symbol: {quantity: shares, premium_total: float, strike: float, premium_per_share: float, option_keys: [keys]}}
         assignment_adjustments = {}
+        # Track which option groups were assigned (for exclusion from options P&L)
+        assigned_option_keys = set()
 
         # Analyze sell-only option groups to detect potential assignments (only in YTD)
         for key, data in option_trades.items():
@@ -254,34 +211,105 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                             price = float(price_str)
 
                             # Parse option symbol to get underlying and strike
-                            # Format: UNDERLYING(2)YYMMDD(C/P)STRIKE*1000
-                            m = re.match(r'([A-Z]+)2(\d{2})(\d{2})(\d{2})([CP])(\d{8})', option_symbol)
+                            # Format: UNDERLYINGYYMMDD(C/P)STRIKE*1000 (YYMMDD is 6 digits, NO separate version digit)
+                            m = re.match(r'([A-Z]+)(\d{6})([CP])(\d{8})', option_symbol)
                             if m:
                                 underlying = m.group(1)
-                                strike = int(m.group(6)) / 1000  # Convert from cents
+                                strike = int(m.group(4)) / 1000  # Convert from cents
                                 contracts = qty
                                 shares = contracts * 100
                                 premium = price * shares
 
-                                # Store assignment data
-                                if underlying not in assignment_adjustments:
-                                    assignment_adjustments[underlying] = {
+                                # Store assignment data using full contract (including expiry) as key
+                                # This prevents lumping together different expiry dates
+                                assignment_key = option_symbol  # Full contract symbol
+                                if assignment_key not in assignment_adjustments:
+                                    assignment_adjustments[assignment_key] = {
                                         'quantity': 0,
                                         'premium_total': 0,
                                         'strike': strike,
-                                        'premium_per_share': 0
+                                        'premium_per_share': 0,
+                                        'option_keys': [],
+                                        'underlying': underlying  # Keep underlying for stock matching
                                     }
 
-                                assignment_adjustments[underlying]['quantity'] += shares
-                                assignment_adjustments[underlying]['premium_total'] += premium
+                                assignment_adjustments[assignment_key]['quantity'] += shares
+                                assignment_adjustments[assignment_key]['premium_total'] += premium
+                                assignment_adjustments[assignment_key]['option_keys'].append(key)
+                                # Track this option group as assigned (will be excluded from options P&L)
+                                assigned_option_keys.add(key)
                         except (ValueError, IndexError):
                             continue
 
         # Calculate premium per share for each assignment
-        for symbol in assignment_adjustments:
-            adj = assignment_adjustments[symbol]
+        for contract_key in assignment_adjustments:
+            adj = assignment_adjustments[contract_key]
             if adj['quantity'] > 0:
                 adj['premium_per_share'] = adj['premium_total'] / adj['quantity']
+
+        # Reorganize by underlying symbol for easier stock matching
+        # Create a mapping: underlying -> list of assignments
+        assignments_by_symbol = {}
+        for contract_key, adj in assignment_adjustments.items():
+            underlying = adj['underlying']
+            if underlying not in assignments_by_symbol:
+                assignments_by_symbol[underlying] = []
+            assignments_by_symbol[underlying].append({
+                'quantity': adj['quantity'],
+                'premium_total': adj['premium_total'],
+                'strike': adj['strike'],
+                'contract_key': contract_key
+            })
+
+        # SECOND: Calculate options P&L (excluding assigned options)
+        options_pl = 0
+        completed_transactions = []
+        closed_option_positions = 0
+        open_option_positions = 0
+
+        for key, data in option_trades.items():
+            has_buy = data['buy'] != 0
+            has_sell = data['sell'] != 0
+            is_in_portfolio = data['any_in_portfolio']
+            is_assigned = key in assigned_option_keys
+
+            # Count as CLOSED if:
+            # 1. Both buy and sell in YTD, OR
+            # 2. Only buy or only sell BUT NOT in portfolio AND not assigned to stock
+            # NOTE: Assigned options are NOT counted here - their P&L will be included when stock is sold
+            if not is_in_portfolio and not is_assigned:
+                # Position is closed (both sides in YTD, or expired)
+                options_pl += data['buy'] + data['sell']
+                completed_transactions.extend(data['transactions'])
+                if has_buy or has_sell:
+                    closed_option_positions += 1
+            elif is_in_portfolio:
+                # Still open in portfolio (or assigned to stock that's still open)
+                open_option_positions += 1
+            # Note: is_assigned options are simply skipped here
+            # They will be counted in the stock P&L when the stock is sold
+
+        # Calculate unrealized P&L from portfolio API (using cost basis)
+        total_unrealized_pl = 0
+        if 'positions' in portfolio:
+            for pos in portfolio['positions']:
+                current_value = float(pos.get('currentValue', 0))
+                cost_basis_dict = pos.get('costBasis', {})
+
+                # Parse cost basis (it's a string representation of dict)
+                if isinstance(cost_basis_dict, str):
+                    import ast
+                    try:
+                        cost_basis_dict = ast.literal_eval(cost_basis_dict)
+                    except:
+                        cost_basis_dict = {}
+
+                total_cost = float(cost_basis_dict.get('totalCost', 0))
+
+                # Unrealized P&L = current value - cost basis
+                # For short positions (negative quantity): cost is negative, so (value - cost) works correctly
+                unrealized = current_value - total_cost
+                total_unrealized_pl += unrealized
 
         # Build a map of portfolio cost basis for stock positions
         # This helps detect assignments that happened before YTD
@@ -321,21 +349,21 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                 stock_positions[symbol] = []
 
             if trade['side'] == 'BUY':
-                # Check if this BUY matches an assignment (quantity matches exactly)
+                # Check if this BUY matches an assignment
                 amount = trade['amount']
                 original_amount = amount
                 cost_basis_from_portfolio = None
 
-                # First, check YTD assignment adjustments
-                if symbol in assignment_adjustments:
-                    adj = assignment_adjustments[symbol]
-                    # Match by exact quantity (assignment creates specific share count)
-                    if trade['quantity'] == adj['quantity']:
-                        # Adjust cost basis: original cost - premium received
-                        # This prevents double-counting the option premium
-                        cost_adjustment = adj['premium_total']
-                        amount = amount - cost_adjustment
-                        cost_basis_from_portfolio = 'ytd_assignment'
+                # Check assignments for this symbol
+                if symbol in assignments_by_symbol:
+                    for adj in assignments_by_symbol[symbol]:
+                        # Match by exact quantity
+                        if trade['quantity'] == adj['quantity']:
+                            # Adjust cost basis by premium received
+                            cost_adjustment = adj['premium_total']
+                            amount = amount + cost_adjustment  # Add premium to reduce negative amount
+                            cost_basis_from_portfolio = 'ytd_assignment'
+                            break  # Use first matching assignment
 
                 # Second, check if this BUY matches a portfolio position (pre-YTD assignment)
                 if cost_basis_from_portfolio is None and symbol in portfolio_cost_basis:
@@ -368,11 +396,26 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     match_pl = (sell_amount_per_share - buy_amount_per_share) * match_qty
                     stocks_pl += match_pl
 
+                    # Check if this stock position came from an assignment
+                    # Cost basis was already reduced by premium, so no additional calculation needed
+                    assignment_premium = 0
+                    if buy_trade.get('cost_basis_source') == 'ytd_assignment' and symbol in assignments_by_symbol:
+                        # Find the matching assignment
+                        for adj in assignments_by_symbol[symbol]:
+                            if buy_trade['quantity'] == adj['quantity']:
+                                premium_ratio = match_qty / adj['quantity']
+                                assignment_premium = adj['premium_total'] * premium_ratio
+                                break
+
                     # Add synthetic P&L transaction with closing date for chart
                     # This ensures stock P&L is included in cumulative chart
+                    description = f'Stock P&L: {symbol} {match_qty} shares'
+                    if assignment_premium > 0:
+                        description += f' (cost basis reduced by assignment premium ${assignment_premium:.2f})'
+
                     completed_transactions.append({
                         'netAmount': match_pl,
-                        'description': f'Stock P&L: {symbol} {match_qty} shares',
+                        'description': description,
                         'timestamp': trade['timestamp'],  # Closing date (SELL date)
                         'type': 'stock_pnl',
                         'symbol': symbol
@@ -604,13 +647,15 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.13 (FIX: Assignment adjustment regex now correctly uses 8 digits for strike price)'
+        'version': '3.15 (FIX: Correct assignment matching by specific option contract, not lumping all options together)'
     })
 
 @app.route('/api/debug/stock_trades')
 def debug_stock_trades():
     """Debug endpoint to trace through stock FIFO matching with assignment adjustments"""
+    print("DEBUG: Endpoint called!")
     try:
+        print("DEBUG: About to get token")
         token = get_access_token()
         account_id = get_account_id(token)
 
@@ -690,10 +735,11 @@ def debug_stock_trades():
                             price_str = parts[4].replace('$', '').replace(',', '')
                             price = float(price_str)
 
-                            m = re.match(r'([A-Z]+)2(\d{2})(\d{2})(\d{2})([CP])(\d{8})', option_symbol)
+                            # Format: UNDERLYINGYYMMDD(C/P)STRIKE*1000 (YYMMDD is 6 digits, NO separate version digit)
+                            m = re.match(r'([A-Z]+)(\d{6})([CP])(\d{8})', option_symbol)
                             if m:
                                 underlying = m.group(1)
-                                strike = int(m.group(6)) / 1000
+                                strike = int(m.group(4)) / 1000  # Convert from cents
                                 contracts = qty
                                 shares = contracts * 100
                                 premium = price * shares
@@ -748,13 +794,24 @@ def debug_stock_trades():
                 cost_adjustment = 0
                 adjusted = False
 
-                # Apply assignment adjustment
+                # Skip raw BUY trades that correspond to assignments.
+                # When a put is assigned, Schwab API creates both:
+                # 1. An option assignment record (used to create synthetic trades)
+                # 2. An actual stock BUY record (this raw trade at strike price)
+                # We skip the raw BUY since the synthetic trade already represents it correctly.
                 if side == 'BUY' and symbol in assignment_adjustments:
                     adj = assignment_adjustments[symbol]
-                    if qty == adj['quantity']:
-                        cost_adjustment = adj['premium_total']
-                        amount = amount - cost_adjustment
-                        adjusted = True
+                    # Calculate price from this raw trade
+                    price_per_share = abs(amount / qty) if qty > 0 else 0
+                    # Check if this raw trade matches the assignment parameters
+                    if (qty == adj['quantity'] and
+                        abs(price_per_share - adj['strike']) < 0.01):  # Allow small floating point diff
+                        print(f"DEBUG: Skipping raw BUY trade for {symbol} assignment: {qty} shares @ ${price_per_share:.2f} matches strike ${adj['strike']:.2f}")
+                        continue  # Skip this raw BUY trade
+
+                # NOTE: Don't apply assignment adjustment to remaining raw BUY trades here.
+                # The synthetic trade generation below will create the correct assignment trades.
+                # Applying adjustment here would incorrectly mark existing BUY trades as adjusted.
 
                 stock_trades.append({
                     'symbol': symbol,
@@ -771,12 +828,62 @@ def debug_stock_trades():
         # Sort by timestamp
         stock_trades.sort(key=lambda x: x['timestamp'])
 
-        # FIFO matching
+        # Generate synthetic BUY trades for assignments with correct quantity
+        # When a put is assigned, Schwab doesn't create a proper "BUY X shares" transaction,
+        # so we directly create synthetic trades from assignment_adjustments data
+        # Find the timestamp of the corresponding SELL trade to place the synthetic BUY nearby
+        print(f"DEBUG: assignment_adjustments = {assignment_adjustments}")
+        for symbol, adj in assignment_adjustments.items():
+            print(f"DEBUG: Creating synthetic BUY trade for {symbol} assignment: {adj}")
+
+            # Find the first SELL trade for this symbol to get a nearby timestamp
+            nearby_timestamp = None
+            for trade in stock_trades:
+                if trade['symbol'] == symbol and trade['side'] == 'SELL':
+                    nearby_timestamp = trade['timestamp']
+                    break
+
+            # If no SELL trade found, use current time
+            if not nearby_timestamp:
+                nearby_timestamp = datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ')
+
+            # Create the synthetic BUY trade with correct quantity and premium adjustment
+            original_cost = adj['quantity'] * adj['strike']  # Cost at strike price
+            adjusted_cost = original_cost - adj['premium_total']  # Premium reduces cost basis
+
+            synthetic_trade = {
+                'symbol': symbol,
+                'side': 'BUY',
+                'quantity': adj['quantity'],
+                'amount': -adjusted_cost,  # BUY trades have negative amounts (cash outflow)
+                'original_amount': -original_cost,
+                'cost_adjustment': adj['premium_total'],
+                'adjusted': True,
+                'timestamp': nearby_timestamp,
+                'description': f"BUY {adj['quantity']} {symbol} at ${adj['strike']:.2f} (assignment from put, adj=${adj['premium_total']:.2f})"
+            }
+
+            print(f"DEBUG: Created synthetic trade: qty={synthetic_trade['quantity']}, amount={synthetic_trade['amount']}, adj=${synthetic_trade['cost_adjustment']}")
+            stock_trades.append(synthetic_trade)
+            # Verify the trade was added correctly
+            print(f"DEBUG: After append, last trade in stock_trades has qty={stock_trades[-1]['quantity']}")
+
+        # Re-sort after adding synthetic trades
+        stock_trades.sort(key=lambda x: x['timestamp'])
+
+        # FIFO matching - use a deep copy for processing to preserve original trade quantities for display
+        stock_trades_copy = copy.deepcopy(stock_trades)
         stock_positions = {}
         fifo_log = []
         stocks_pl = 0
 
-        for trade in stock_trades:
+        # DEBUG: Log all trade quantities before FIFO
+        print(f"DEBUG: Before FIFO - trade quantities:")
+        for i, t in enumerate(stock_trades):
+            is_synth = " [SYNTHETIC]" if t.get('adjusted') else ""
+            print(f"  {i}. {t['side']} {t['symbol']}: qty={t['quantity']}{is_synth}")
+
+        for trade in stock_trades_copy:
             symbol = trade['symbol']
             if symbol not in stock_positions:
                 stock_positions[symbol] = []
@@ -791,9 +898,15 @@ def debug_stock_trades():
             if trade['side'] == 'BUY':
                 stock_positions[symbol].append(trade)
                 log_entry['after_queue'] = len(stock_positions[symbol])
+                # Debug SOXL assignment
+                if symbol == 'SOXL' and trade['quantity'] == 2000:
+                    print(f"DEBUG SOXL BUY: Added to queue")
+                    print(f"  Amount: ${trade['amount']}")
+                    print(f"  Cost basis source: {trade.get('cost_basis_source', 'None')}")
             else:
                 remaining_qty = trade['quantity']
                 sell_price = abs(trade['amount'] / trade['quantity']) if trade['quantity'] > 0 else 0
+                print(f"DEBUG: FIFO - SELL {trade['quantity']} {symbol} @ ${sell_price:.2f} -> matching against {len(stock_positions[symbol])} BUY positions")
 
                 while remaining_qty > 0 and stock_positions[symbol]:
                     buy_trade = stock_positions[symbol][0]
@@ -801,6 +914,8 @@ def debug_stock_trades():
                     buy_price = abs(buy_trade['amount'] / buy_trade['quantity']) if buy_trade['quantity'] > 0 else 0
                     match_pl = (sell_price - buy_price) * match_qty
                     stocks_pl += match_pl
+                    is_synth = " [SYNTHETIC]" if buy_trade.get('adjusted') else ""
+                    print(f"  MATCH: {match_qty} shares @ sell=${sell_price:.2f} vs buy=${buy_price:.2f}{is_synth} -> P&L=${match_pl:.2f} (running total: ${stocks_pl:.2f})")
 
                     log_entry['matches'].append({
                         'match_qty': match_qty,
@@ -821,6 +936,12 @@ def debug_stock_trades():
 
             log_entry['after_queue'] = len(stock_positions.get(symbol, []))
             fifo_log.append(log_entry)
+
+        # DEBUG: Log all trade quantities after FIFO
+        print(f"DEBUG: After FIFO - trade quantities:")
+        for i, t in enumerate(stock_trades):
+            is_synth = " [SYNTHETIC]" if t.get('adjusted') else ""
+            print(f"  {i}. {t['side']} {t['symbol']}: qty={t['quantity']}{is_synth}")
 
         # Show remaining open positions
         open_positions = {}
@@ -843,7 +964,8 @@ def debug_stock_trades():
             'stock_trades': stock_trades,
             'fifo_log': fifo_log,
             'open_positions': open_positions,
-            'stocks_pl': stocks_pl
+            'stocks_pl': stocks_pl,
+            'option_trades': option_trades  # DEBUG: include option_trades
         })
 
     except Exception as e:
@@ -934,7 +1056,7 @@ def debug_all_positions():
         if 'positions' in portfolio:
             for pos in portfolio['positions']:
                 symbol = pos.get('symbol', '')
-                # Option symbols have format like "NVDA260123P00175000"
+                # Option symbols have format like "NVDA260130P00065000"
                 if re.match(r'[A-Z]+2\d{2}\d{3}[CP]\d{8}', symbol):
                     open_in_portfolio.add(symbol)
 
