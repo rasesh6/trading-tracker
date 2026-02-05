@@ -91,8 +91,10 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                 if re.match(r'[A-Z]+2\d{2}\d{3}[CP]\d{8}', symbol):
                     open_in_portfolio.add(symbol)
 
-        # Separate options (group by underlying/expiry) and stocks (FIFO)
-        option_trades = {}
+        # Separate options (track each FULL CONTRACT individually) and stocks (FIFO)
+        # KEY: Each option contract is identified by its FULL OCC symbol
+        # Example: NFLX260320P00074000 and NFLX260320P00080000 are TWO DIFFERENT contracts
+        option_contracts = {}
         stock_trades = []
 
         for tx in transactions:
@@ -108,23 +110,27 @@ def calculate_pl_from_history(start_date=None, end_date=None):
 
             match = re.search(r'([A-Z]+2\d{2}\d{3}[CP]\d{8})', description)
             if match:
+                # Use FULL CONTRACT symbol as key (this is the unique identifier)
                 contract = match.group(1)
-                # Extract underlying and expiry for grouping
-                m2 = re.match(r'([A-Z]+)(\d{6})([CP])(\d{8})', contract)
-                if m2:
-                    key = f"{m2.group(1)}_{m2.group(2)}"  # underlying_expiry
-                else:
-                    key = contract
 
-                if key not in option_trades:
-                    option_trades[key] = {'buy': 0, 'sell': 0, 'transactions': [], 'any_in_portfolio': False}
+                if contract not in option_contracts:
+                    option_contracts[contract] = {
+                        'buy': 0,
+                        'sell': 0,
+                        'transactions': [],
+                        'in_portfolio': False,
+                        'has_buy': False,
+                        'has_sell': False
+                    }
 
                 if 'BUY' in description:
-                    option_trades[key]['buy'] += net_amount
+                    option_contracts[contract]['buy'] += net_amount
+                    option_contracts[contract]['has_buy'] = True
                 else:
-                    option_trades[key]['sell'] += net_amount
+                    option_contracts[contract]['sell'] += net_amount
+                    option_contracts[contract]['has_sell'] = True
 
-                option_trades[key]['transactions'].append({
+                option_contracts[contract]['transactions'].append({
                     'description': description,
                     'netAmount': net_amount,
                     'timestamp': timestamp
@@ -147,34 +153,24 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                         'description': description
                     })
 
-        # Check which option groups have any contract still in portfolio
-        for key, data in option_trades.items():
-            # Check if any contract in this group is in portfolio
-            data['any_in_portfolio'] = False
-
-        # Re-check portfolio more carefully - extract full option contracts
-        # Also check for STOCK positions that might be from assignment
-        stock_symbols_in_portfolio = set()
+        # Check which individual option contracts are currently OPEN in portfolio
+        # This is critical: must check by FULL CONTRACT symbol, not grouped
+        open_contracts_in_portfolio = set()
         if 'positions' in portfolio:
             for pos in portfolio['positions']:
                 instrument = pos.get('instrument', {})
                 symbol = instrument.get('symbol', '')
-                # Check if it's a stock (not an option)
-                if not re.match(r'[A-Z]+2\d{6}[CP]\d{8}', symbol):
-                    stock_symbols_in_portfolio.add(symbol)
+                # Extract full option contract symbol if present
+                # Portfolio format: UNDERLYANDINGYYMMDD(C/P)STRIKE*1000
+                # Example: NFLX260320P00074000 (no separate version digit)
+                contract_match = re.search(r'([A-Z]+\d{6}[CP]\d{8})', symbol)
+                if contract_match:
+                    open_contracts_in_portfolio.add(contract_match.group(1))
 
-        if 'positions' in portfolio:
-            for pos in portfolio['positions']:
-                instrument = pos.get('instrument', {})
-                symbol = instrument.get('symbol', '')
-                # Check each option trade against portfolio
-                for key, data in option_trades.items():
-                    for tx in data['transactions']:
-                        # Extract contract from transaction description
-                        tx_match = re.search(r'([A-Z]+2\d{2}\d{3}[CP]\d{8})', tx['description'])
-                        if tx_match and tx_match.group(1) == symbol:
-                            data['any_in_portfolio'] = True
-                            break
+        # Mark each contract as open/closed based on portfolio
+        for contract in option_contracts:
+            # Check if exact contract is in portfolio
+            option_contracts[contract]['in_portfolio'] = contract in open_contracts_in_portfolio
 
         # FIXED: Do NOT mark expired options as "open" just because underlying stock exists
         # The portfolio check at lines 165-176 already correctly identifies which option
@@ -190,8 +186,8 @@ def calculate_pl_from_history(start_date=None, end_date=None):
         # Track which option groups were assigned (for exclusion from options P&L)
         assigned_option_keys = set()
 
-        # Analyze sell-only option groups to detect potential assignments (only in YTD)
-        for key, data in option_trades.items():
+        # Analyze sell-only option contracts to detect potential assignments (only in YTD)
+        for contract, data in option_contracts.items():
             has_buy = data['buy'] != 0
             has_sell = data['sell'] != 0
 
@@ -235,9 +231,9 @@ def calculate_pl_from_history(start_date=None, end_date=None):
 
                                 assignment_adjustments[assignment_key]['quantity'] += shares
                                 assignment_adjustments[assignment_key]['premium_total'] += premium
-                                assignment_adjustments[assignment_key]['option_keys'].append(key)
+                                assignment_adjustments[assignment_key]['option_keys'].append(contract)
                                 # Track this option group as assigned (will be excluded from options P&L)
-                                assigned_option_keys.add(key)
+                                assigned_option_keys.add(contract)
                         except (ValueError, IndexError):
                             continue
 
@@ -261,33 +257,29 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                 'contract_key': contract_key
             })
 
-        # SECOND: Calculate options P&L (excluding assigned options)
+        # Calculate options P&L (tracking each contract individually)
         options_pl = 0
         completed_transactions = []
-        closed_option_positions = 0
-        open_option_positions = 0
+        closed_option_contracts = 0
+        open_option_contracts = 0
 
-        for key, data in option_trades.items():
+        for contract, data in option_contracts.items():
             has_buy = data['buy'] != 0
             has_sell = data['sell'] != 0
-            is_in_portfolio = data['any_in_portfolio']
-            is_assigned = key in assigned_option_keys
+            is_in_portfolio = data['in_portfolio']
 
             # Count as CLOSED if:
             # 1. Both buy and sell in YTD, OR
-            # 2. Only buy or only sell BUT NOT in portfolio AND not assigned to stock
-            # NOTE: Assigned options are NOT counted here - their P&L will be included when stock is sold
-            if not is_in_portfolio and not is_assigned:
-                # Position is closed (both sides in YTD, or expired)
+            # 2. Only buy or only sell BUT NOT in portfolio (expired/worthless or closed early)
+            if not is_in_portfolio:
+                # Contract is closed (both sides in YTD, or expired/closed early)
                 options_pl += data['buy'] + data['sell']
                 completed_transactions.extend(data['transactions'])
                 if has_buy or has_sell:
-                    closed_option_positions += 1
+                    closed_option_contracts += 1
             elif is_in_portfolio:
-                # Still open in portfolio (or assigned to stock that's still open)
-                open_option_positions += 1
-            # Note: is_assigned options are simply skipped here
-            # They will be counted in the stock P&L when the stock is sold
+                # Contract is still open in portfolio
+                open_option_contracts += 1
 
         # Calculate unrealized P&L from portfolio API (using cost basis)
         total_unrealized_pl = 0
@@ -472,7 +464,7 @@ def calculate_pl_from_history(start_date=None, end_date=None):
             'short_term_pl': total_realized_pl,
             'long_term_pl': 0,
             'total_unrealized_pl': total_unrealized_pl,
-            'total_positions': closed_option_positions + closed_stock_positions,
+            'total_positions': closed_option_contracts + closed_stock_positions,
             'open_positions': portfolio_open_count,  # Use actual portfolio count
             'transactions': completed_transactions,
             'last_updated': now.isoformat()
@@ -586,7 +578,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.19 (FIX: MTD simplified to use transaction timestamps directly. No more regrouping which caused USO Jan+Feb trades to be lumped together)'
+        'version': '3.20 (FIX: Track each option contract by FULL OCC symbol, not grouped. NFLX260320P00074000 and NFLX260320P00080000 tracked separately. Closed contracts now included even if other contracts with same expiry are open.)'
     })
 
 @app.route('/api/debug/stock_trades')
