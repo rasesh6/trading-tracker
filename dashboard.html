@@ -192,93 +192,32 @@
     </div> <!-- End content-wrapper -->
 
     <script>
-        const API_KEY_STORAGE = 'tracker_api_key';
+        // HARDCODED API KEY (safe - local file only)
+        const API_KEY = '04a41e5aab501078abbdbcc6f308921c1a9b293f544ec694b77583fbb9f7a0a6';
         let pnlChart = null;
 
-        // Authentication functions
+        // Get API key (hardcoded for local file)
         function getApiKey() {
-            return sessionStorage.getItem(API_KEY_STORAGE);
-        }
-
-        async function authenticate() {
-            const apiKey = document.getElementById('api-key-input').value.trim();
-            const errorDiv = document.getElementById('login-error');
-
-            if (!apiKey) {
-                errorDiv.textContent = 'Please enter an API key';
-                errorDiv.classList.add('visible');
-                return;
-            }
-
-            // Validate API key by testing /api/health endpoint
-            try {
-                const response = await fetch('/api/health', {
-                    headers: { 'X-API-Key': apiKey }
-                });
-
-                if (response.ok) {
-                    // Store API key
-                    sessionStorage.setItem(API_KEY_STORAGE, apiKey);
-                    // Hide login overlay
-                    document.getElementById('login-overlay').classList.add('hidden');
-                    document.getElementById('content-wrapper').classList.remove('hidden');
-                    // Load data
-                    loadData();
-                } else {
-                    errorDiv.textContent = 'Invalid API key. Please try again.';
-                    errorDiv.classList.add('visible');
-                }
-            } catch (error) {
-                errorDiv.textContent = 'Connection error. Please try again.';
-                errorDiv.classList.add('visible');
-                console.error('Authentication error:', error);
-            }
-        }
-
-        function checkAuthentication() {
-            const apiKey = getApiKey();
-            if (apiKey) {
-                // Already authenticated
-                document.getElementById('login-overlay').classList.add('hidden');
-                document.getElementById('content-wrapper').classList.remove('hidden');
-                return true;
-            }
-            return false;
+            return API_KEY;
         }
 
         // Wrapper for authenticated fetch
         async function authenticatedFetch(url, options = {}) {
-            const apiKey = getApiKey();
-            if (!apiKey) {
-                // Not authenticated, show login
-                document.getElementById('login-overlay').classList.remove('hidden');
-                document.getElementById('content-wrapper').classList.add('hidden');
-                throw new Error('Not authenticated');
-            }
-
             const headers = {
                 ...options.headers,
-                'X-API-Key': apiKey
+                'X-API-Key': API_KEY
             };
 
             return fetch(url, { ...options, headers });
         }
 
-        // Handle Enter key in login input
+        // Auto-login on page load
         document.addEventListener('DOMContentLoaded', () => {
-            const input = document.getElementById('api-key-input');
-            if (input) {
-                input.addEventListener('keypress', (e) => {
-                    if (e.key === 'Enter') {
-                        authenticate();
-                    }
-                });
-            }
-
-            // Check authentication on page load
-            if (checkAuthentication()) {
-                loadData();
-            }
+            // Hide login overlay immediately
+            document.getElementById('login-overlay').classList.add('hidden');
+            document.getElementById('content-wrapper').classList.remove('hidden');
+            // Load data automatically
+            loadData();
         });
 
 
