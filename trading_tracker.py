@@ -20,6 +20,35 @@ app = Flask(__name__)
 _history_cache = None
 _cache_time = None
 
+# ============================================================================
+# API KEY AUTHENTICATION
+# ============================================================================
+
+def require_api_key(f):
+    """Decorator to require API key for endpoint access"""
+    def decorated_function(*args, **kwargs):
+        # Get expected API key from environment
+        expected_key = os.environ.get('TRACKER_API_KEY')
+
+        # If no API key is configured, allow all requests (development mode)
+        if not expected_key:
+            return f(*args, **kwargs)
+
+        # Check for API key in header
+        provided_key = request.headers.get('X-API-Key', '')
+
+        if not provided_key or provided_key != expected_key:
+            return jsonify({
+                'error': 'Unauthorized',
+                'message': 'Valid API key required'
+            }), 401
+
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+# ============================================================================
+
 def get_access_token():
     """Get access token from Public API"""
     secret = os.environ.get('PUBLIC_API_TOKEN')
@@ -548,21 +577,25 @@ def get_trades(days=7):
 
 # API Routes
 @app.route('/')
+@require_api_key
 def index():
     return send_file('dashboard.html')
 
 @app.route('/api/stats')
+@require_api_key
 def stats():
     """Get trading statistics"""
     return jsonify(get_stats())
 
 @app.route('/api/trades')
+@require_api_key
 def trades():
     """Get transactions"""
     days = int(request.args.get('days', 7))
     return jsonify(get_trades(days))
 
 @app.route('/api/update')
+@require_api_key
 def update():
     """Force refresh"""
     global _history_cache, _cache_time
@@ -571,6 +604,7 @@ def update():
     return jsonify(calculate_pl_from_history())
 
 @app.route('/api/reset')
+@require_api_key
 def reset():
     """Reset cache"""
     global _history_cache, _cache_time
@@ -588,6 +622,7 @@ def health():
     })
 
 @app.route('/api/debug/stock_trades')
+@require_api_key
 def debug_stock_trades():
     """Debug endpoint to trace through stock FIFO matching with assignment adjustments"""
     print("DEBUG: Endpoint called!")
@@ -910,6 +945,7 @@ def debug_stock_trades():
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
 
 @app.route('/api/debug/raw_history')
+@require_api_key
 def debug_raw_history():
     """Debug endpoint to show raw Public API history transactions"""
     try:
@@ -967,6 +1003,7 @@ def debug_raw_history():
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
 
 @app.route('/api/debug/all_positions')
+@require_api_key
 def debug_all_positions():
     """Debug endpoint to show all positions and check Portfolio API for open positions"""
     try:
