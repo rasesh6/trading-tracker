@@ -17,6 +17,19 @@ from requests import post, get
 
 app = Flask(__name__)
 
+# ============================================================================
+# CORS ENABLEMENT
+# ============================================================================
+
+@app.after_request
+def after_request(response):
+    """Add CORS headers to all responses"""
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, X-API-Key')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    return response
+
+# ============================================================================
 # Cache
 _history_cache = None
 _cache_time = None
