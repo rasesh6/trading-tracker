@@ -10,6 +10,7 @@ import os
 import json
 import re
 import copy
+import functools
 from datetime import datetime, timedelta, timezone
 from flask import Flask, jsonify, send_file, request
 from requests import post, get
@@ -26,6 +27,7 @@ _cache_time = None
 
 def require_api_key(f):
     """Decorator to require API key for endpoint access"""
+    @functools.wraps(f)
     def decorated_function(*args, **kwargs):
         # Get expected API key from environment
         expected_key = os.environ.get('TRACKER_API_KEY')
