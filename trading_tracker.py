@@ -183,13 +183,15 @@ def calculate_pl_from_history(start_date=None, end_date=None):
             buys = sorted(data['buys'], key=lambda x: x['timestamp'])
             sells = sorted(data['sells'], key=lambda x: x['timestamp'])
 
-            print(f"DEBUG {symbol}: {len(buys)} BUYs, {len(sells)} SELLs")
-
             # Match using LIFO with quantity tracking
             buy_queue = buys.copy()  # Queue of available buys
 
             for sell in sells:
-                remaining_sell_qty = abs(int(sell['description'].split()[1]))
+                try:
+                    remaining_sell_qty = abs(int(sell['description'].split()[1]))
+                except:
+                    continue  # Skip if can't parse quantity
+
                 remaining_sell_amount = sell['amount']
 
                 # Match against most recent buys (LIFO)
@@ -207,8 +209,6 @@ def calculate_pl_from_history(start_date=None, end_date=None):
 
                     # P&L for this match
                     pl = match_amount + sell_match_amount
-
-                    print(f"  MATCH: {match_qty} shares - BUY {match_amount:.2f} + SELL {sell_match_amount:.2f} = {pl:.2f}")
 
                     closed_positions.append({
                         'symbol': symbol,
@@ -844,7 +844,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '4.0 (COMPLETE REWRITE: Simple P&L calculation. Match BUY/SELL pairs using LIFO. P&L = buy_amount + sell_amount. Assignment cost basis already in BUY amount. For 2025 assignments, fetch 2025 history to find opening BUY.)'
+        'version': '4.1 (FIX: Match BUY/SELL by quantity using LIFO. Previous version matched whole transactions ignoring quantities. Now properly matches by share count with LIFO.)'
     })
 
 @app.route('/api/debug/stock_trades')
