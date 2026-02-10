@@ -436,27 +436,25 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     match_qty = min(remaining_qty, buy_trade['quantity'])
                     buy_amount_per_share = abs(buy_trade['amount'] / buy_trade['quantity'])
                     match_pl = (sell_amount_per_share - buy_amount_per_share) * match_qty
-                    stocks_pl += match_pl
 
-                    # Check if this stock position came from an assignment
-                    # We need to subtract the assignment premium from stock P&L
-                    # because the premium is option P&L, not stock P&L
+                    # Check if this stock position came from a YTD assignment
+                    # If so, subtract the premium from stock P&L (it's option P&L, not stock P&L)
                     assignment_premium = 0
                     if buy_trade.get('cost_basis_source') == 'ytd_assignment' and symbol in assignments_by_symbol:
-                        # Find the matching assignment
                         for adj in assignments_by_symbol[symbol]:
                             if buy_trade['quantity'] == adj['quantity']:
-                                premium_ratio = match_qty / adj['quantity']
+                                premium_ratio = match_qty / buy_trade['quantity']
                                 assignment_premium = adj['premium_total'] * premium_ratio
                                 break
 
+                    stocks_pl += match_pl - assignment_premium
+
                     # Add synthetic P&L transaction with closing date for chart
                     # This ensures stock P&L is included in cumulative chart
-                    # Assignment premium is excluded from stock P&L (it's option P&L)
                     description = f'Stock P&L: {symbol} {match_qty} shares'
 
                     completed_transactions.append({
-                        'netAmount': match_pl - assignment_premium,  # Exclude assignment premium from stock P&L
+                        'netAmount': match_pl - assignment_premium,  # Subtract YTD assignment premium from stock P&L
                         'description': description,
                         'timestamp': trade['timestamp'],  # Closing date (SELL date)
                         'type': 'stock_pnl',
@@ -901,15 +899,16 @@ def debug_stock_trades():
                     buy_price = abs(buy_trade['amount'] / buy_trade['quantity']) if buy_trade['quantity'] > 0 else 0
                     match_pl = (sell_price - buy_price) * match_qty
 
-                    # Subtract assignment premium from stock P&L (it's option P&L, not stock P&L)
+                    # For synthetic trades (YTD assignments), subtract cost_adjustment from stock P&L
+                    # For portfolio assignments (pre-YTD), keep the adjustment (it's part of cost basis)
                     cost_adjustment = buy_trade.get('cost_adjustment', 0)
-                    if cost_adjustment > 0:
+                    if cost_adjustment > 0 and buy_trade.get('adjusted'):
                         premium_ratio = match_qty / buy_trade['quantity']
                         match_pl -= cost_adjustment * premium_ratio
 
                     stocks_pl += match_pl
                     is_synth = " [SYNTHETIC]" if buy_trade.get('adjusted') else ""
-                    adj_note = f" (incl. ${cost_adjustment * premium_ratio:.2f} assignment adj)" if cost_adjustment > 0 else ""
+                    adj_note = f" (incl. -${cost_adjustment * premium_ratio:.2f} premium adj)" if (cost_adjustment > 0 and buy_trade.get('adjusted')) else ""
                     print(f"  MATCH: {match_qty} shares @ sell=${sell_price:.2f} vs buy=${buy_price:.2f}{is_synth}{adj_note} -> P&L=${match_pl:.2f} (running total: ${stocks_pl:.2f})")
 
                     log_entry['matches'].append({
