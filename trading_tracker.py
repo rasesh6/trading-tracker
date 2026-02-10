@@ -508,6 +508,8 @@ def calculate_pl_from_history(start_date=None, end_date=None):
 
         result = {
             'total_realized_pl': total_realized_pl,
+            'stocks_pl': stocks_pl,  # Stock P&L using LIFO
+            'options_pl': options_pl,  # Option P&L
             'short_term_pl': total_realized_pl,
             'long_term_pl': 0,
             'total_unrealized_pl': total_unrealized_pl,
