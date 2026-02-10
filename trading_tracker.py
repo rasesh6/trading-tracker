@@ -259,7 +259,10 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                                 strike = int(m.group(4)) / 1000  # Convert from cents
                                 contracts = qty
                                 shares = contracts * 100
-                                premium = price * shares
+                                # CRITICAL FIX: Use actual netAmount from transaction, not parsed price
+                                # The parsed price (e.g., 0.65) may not include fees/commissions
+                                # netAmount is the actual premium received
+                                premium = abs(tx['netAmount'])
 
                                 # Store assignment data using full contract (including expiry) as key
                                 # This prevents lumping together different expiry dates
@@ -632,7 +635,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.23 (FIX: Changed from FIFO to LIFO for stock trades to match user Public.com settings. LIFO matches most recent BUY against SELL for accurate cost basis calculation.)'
+        'version': '3.24 (FIX: Use actual netAmount for assignment premiums instead of parsed price. Previous: calculated premium as price*shares which missed fees/commissions. Now: uses abs(tx[netAmount]) which matches Public.com cost basis exactly. Example: SOXL assignment now $1,302.63 instead of $1,300.00, matching Public.com.)'
     })
 
 @app.route('/api/debug/stock_trades')
@@ -728,7 +731,8 @@ def debug_stock_trades():
                                 strike = int(m.group(4)) / 1000  # Convert from cents
                                 contracts = qty
                                 shares = contracts * 100
-                                premium = price * shares
+                                # CRITICAL FIX: Use actual netAmount from transaction, not parsed price
+                                premium = abs(tx['netAmount'])
 
                                 if underlying not in assignment_adjustments:
                                     assignment_adjustments[underlying] = {
