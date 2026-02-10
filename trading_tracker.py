@@ -898,18 +898,9 @@ def debug_stock_trades():
                     match_qty = min(remaining_qty, buy_trade['quantity'])
                     buy_price = abs(buy_trade['amount'] / buy_trade['quantity']) if buy_trade['quantity'] > 0 else 0
                     match_pl = (sell_price - buy_price) * match_qty
-
-                    # For synthetic trades (YTD assignments), subtract cost_adjustment from stock P&L
-                    # For portfolio assignments (pre-YTD), keep the adjustment (it's part of cost basis)
-                    cost_adjustment = buy_trade.get('cost_adjustment', 0)
-                    if cost_adjustment > 0 and buy_trade.get('adjusted'):
-                        premium_ratio = match_qty / buy_trade['quantity']
-                        match_pl -= cost_adjustment * premium_ratio
-
                     stocks_pl += match_pl
                     is_synth = " [SYNTHETIC]" if buy_trade.get('adjusted') else ""
-                    adj_note = f" (incl. -${cost_adjustment * premium_ratio:.2f} premium adj)" if (cost_adjustment > 0 and buy_trade.get('adjusted')) else ""
-                    print(f"  MATCH: {match_qty} shares @ sell=${sell_price:.2f} vs buy=${buy_price:.2f}{is_synth}{adj_note} -> P&L=${match_pl:.2f} (running total: ${stocks_pl:.2f})")
+                    print(f"  MATCH: {match_qty} shares @ sell=${sell_price:.2f} vs buy=${buy_price:.2f}{is_synth} -> P&L=${match_pl:.2f} (running total: ${stocks_pl:.2f})")
 
                     log_entry['matches'].append({
                         'match_qty': match_qty,
