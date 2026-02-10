@@ -136,7 +136,7 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                 if re.match(r'[A-Z]+2\d{2}\d{3}[CP]\d{8}', symbol):
                     open_in_portfolio.add(symbol)
 
-        # Separate options (track each FULL CONTRACT individually) and stocks (FIFO)
+        # Separate options (track each FULL CONTRACT individually) and stocks (LIFO)
         # KEY: Each option contract is identified by its FULL OCC symbol
         # Example: NFLX260320P00074000 and NFLX260320P00080000 are TWO DIFFERENT contracts
         option_contracts = {}
@@ -416,7 +416,7 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     'original_amount': original_amount,
                     'description': trade['description'],
                     'timestamp': trade['timestamp'],
-                    'side': 'BUY',  # These are BUY positions for FIFO matching
+                    'side': 'BUY',  # These are BUY positions for LIFO matching
                     'cost_basis_source': cost_basis_source,
                     'original_quantity': trade['quantity']  # Preserve for completed_transactions
                 })
@@ -425,7 +425,7 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                 sell_amount_per_share = abs(trade['amount'] / trade['quantity'])
 
                 while remaining_qty > 0 and stock_positions[symbol]:
-                    buy_trade = stock_positions[symbol][0]
+                    buy_trade = stock_positions[symbol][-1]  # LIFO: take most recent BUY
                     match_qty = min(remaining_qty, buy_trade['quantity'])
                     buy_amount_per_share = abs(buy_trade['amount'] / buy_trade['quantity'])
                     match_pl = (sell_amount_per_share - buy_amount_per_share) * match_qty
@@ -464,7 +464,7 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     buy_trade['quantity'] -= match_qty
 
                     if buy_trade['quantity'] == 0:
-                        stock_positions[symbol].pop(0)
+                        stock_positions[symbol].pop()  # LIFO: remove from end
                         closed_stock_positions += 1
 
                 if remaining_qty > 0:
@@ -630,7 +630,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.22 (FIX: Use end-of-day UTC as end time for history queries. Previously used current time which missed same-day transactions. Now captures all transactions through 23:59:59 UTC. SOXL Feb 6 puts now correctly included: +$582.69)'
+        'version': '3.23 (FIX: Changed from FIFO to LIFO for stock trades to match user Public.com settings. LIFO matches most recent BUY against SELL for accurate cost basis calculation.)'
     })
 
 @app.route('/api/debug/stock_trades')
@@ -890,10 +890,10 @@ def debug_stock_trades():
             else:
                 remaining_qty = trade['quantity']
                 sell_price = abs(trade['amount'] / trade['quantity']) if trade['quantity'] > 0 else 0
-                print(f"DEBUG: FIFO - SELL {trade['quantity']} {symbol} @ ${sell_price:.2f} -> matching against {len(stock_positions[symbol])} BUY positions")
+                print(f"DEBUG: LIFO - SELL {trade['quantity']} {symbol} @ ${sell_price:.2f} -> matching against {len(stock_positions[symbol])} BUY positions")
 
                 while remaining_qty > 0 and stock_positions[symbol]:
-                    buy_trade = stock_positions[symbol][0]
+                    buy_trade = stock_positions[symbol][-1]  # LIFO: take most recent BUY
                     match_qty = min(remaining_qty, buy_trade['quantity'])
                     buy_price = abs(buy_trade['amount'] / buy_trade['quantity']) if buy_trade['quantity'] > 0 else 0
                     match_pl = (sell_price - buy_price) * match_qty
@@ -913,7 +913,7 @@ def debug_stock_trades():
                     buy_trade['quantity'] -= match_qty
 
                     if buy_trade['quantity'] == 0:
-                        stock_positions[symbol].pop(0)
+                        stock_positions[symbol].pop()  # LIFO: remove from end
 
                 if remaining_qty > 0:
                     log_entry['unmatched'] = remaining_qty
