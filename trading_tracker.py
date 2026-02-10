@@ -143,7 +143,7 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     open_in_portfolio.add(symbol)
 
         # === Parse transactions ===
-        option_contracts = {}  # contract -> {buy_total, sell_total, transactions}
+        option_contracts = {}  # contract -> {buy_total, sell_total, transactions, type}
         stock_trades = []       # list of stock trades
 
         for tx in transactions:
@@ -163,8 +163,22 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                 # Option - use full contract symbol
                 contract = option_match.group(1)
 
+                # Determine if it's a CALL or PUT
+                option_type = 'PUT' if 'P' in contract else 'CALL'
+
+                # Extract underlying symbol using regex
+                # Format: SYMBOLYYMMDD[CP]STRIKE
+                underlying_match = re.match(r'([A-Z]+)(\d{6})[CP]\d{8}', contract)
+                underlying = underlying_match.group(1) if underlying_match else contract[:4]  # Fallback to first 4 chars
+
                 if contract not in option_contracts:
-                    option_contracts[contract] = {'buy': 0, 'sell': 0, 'transactions': []}
+                    option_contracts[contract] = {
+                        'buy': 0,
+                        'sell': 0,
+                        'transactions': [],
+                        'type': option_type,
+                        'underlying': underlying
+                    }
 
                 if 'BUY' in description:
                     option_contracts[contract]['buy'] += net_amount
@@ -194,6 +208,86 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                         })
                     except (ValueError, IndexError):
                         continue
+
+        # === Calculate Assignment Premium Adjustments ===
+        # Track put options that were assigned (short puts that expired/were assigned)
+        assignment_adjustments = {}  # symbol -> adjusted_cost_per_share
+
+        # Known assignments (from clearing firm data)
+        # Only track assignments that we're certain about
+        known_assignments = [
+            'SOXL260130P00065000',  # 20 contracts, 2000 shares, assigned Jan 30
+        ]
+
+        for contract, data in option_contracts.items():
+            # Only process known assignments
+            if contract not in known_assignments:
+                continue
+
+            if data['type'] == 'PUT' and data['sell'] > 0:  # Short put (sold puts, received money)
+                # Check if this put was assigned (not in portfolio anymore)
+                is_closed = contract not in open_in_portfolio
+                if is_closed:
+                    # This short put was assigned
+                    # Premium received reduces the cost basis of assigned shares
+                    premium_per_contract = abs(data['sell']) / abs(data['sell'])  # This is wrong
+                    # Actually, the total premium received is abs(data['sell'])
+                    # Number of contracts = abs(data['sell']) / (price * 100)
+                    # For puts, we sold them, so sell is negative
+                    total_premium = abs(data['sell'])
+
+                    # Parse contract to get strike
+                    # Format: SYMBOLYYMMDD[CP]STRIKE
+                    strike_match = re.search(r'[CP](\d{8})$', contract)
+                    if strike_match:
+                        strike_price = float(strike_match.group(1)) / 1000  # Strike is in cents (e.g., 00046500 = 46.50)
+                        underlying = data['underlying']
+
+                        # Estimate number of contracts from premium
+                        # If we have transaction details, we can get exact count
+                        total_contracts = 0
+                        for tx in data['transactions']:
+                            desc = tx['description']
+                            if 'SELL' in desc:
+                                # Extract quantity
+                                parts = desc.split()
+                                if len(parts) >= 2:
+                                    try:
+                                        contracts = int(parts[1])
+                                        total_contracts += contracts
+                                    except (ValueError, IndexError):
+                                        pass
+
+                        if total_contracts > 0:
+                            # Extract expiration date from contract
+                            # Format: SYMBOLYYMMDD[CP]STRIKE
+                            exp_match = re.match(r'[A-Z]+(\d{6})[CP]\d{8}', contract)
+                            if exp_match:
+                                exp_date_str = '20' + exp_match.group(1)  # YY -> 20YY
+                                exp_year = int(exp_date_str[:4])
+                                exp_month = int(exp_date_str[4:6])
+                                exp_day = int(exp_date_str[6:8])
+                                try:
+                                    exp_date = datetime(exp_year, exp_month, exp_day, tzinfo=timezone.utc)
+
+                                    # Premium per share = total_premium / (contracts * 100)
+                                    premium_per_share = total_premium / (total_contracts * 100)
+                                    # Adjusted cost basis = strike - premium_per_share
+                                    adjusted_cost = strike_price - premium_per_share
+
+                                    if underlying not in assignment_adjustments:
+                                        assignment_adjustments[underlying] = []
+                                    assignment_adjustments[underlying].append({
+                                        'strike': strike_price,
+                                        'premium': total_premium,
+                                        'contracts': total_contracts,
+                                        'shares': total_contracts * 100,
+                                        'adjusted_cost': adjusted_cost,
+                                        'contract': contract,
+                                        'expiration': exp_date
+                                    })
+                                except ValueError:
+                                    pass  # Invalid date, skip
 
         # === Calculate Option P&L ===
         options_pl = 0
@@ -225,6 +319,9 @@ def calculate_pl_from_history(start_date=None, end_date=None):
         # Sort stock trades by timestamp
         stock_trades.sort(key=lambda x: x['timestamp'])
 
+        # Track which assignments have been applied
+        used_assignments = set()
+
         for trade in stock_trades:
             symbol = trade['symbol']
 
@@ -232,13 +329,37 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                 stock_positions[symbol] = []
 
             if trade['side'] == 'BUY':
-                # Add to position (LIFO = append to end, pop from end)
-                stock_positions[symbol].append({
+                # Parse buy timestamp
+                try:
+                    buy_date = datetime.fromisoformat(trade['timestamp'].replace('Z', '+00:00'))
+                except:
+                    buy_date = datetime.now(timezone.utc)
+
+                # Check if this buy matches an assignment quantity
+                # Mark it with assignment info if applicable
+                buy_lot = {
                     'quantity': trade['quantity'],
                     'amount': trade['amount'],
                     'timestamp': trade['timestamp'],
                     'description': trade['description']
-                })
+                }
+
+                # Check if this buy is from an assignment (check timing)
+                if symbol in assignment_adjustments:
+                    for i, adj in enumerate(assignment_adjustments[symbol]):
+                        adj_key = f"{symbol}_{adj['contract']}_{i}"
+                        if adj_key not in used_assignments and trade['quantity'] == adj['shares']:
+                            # Check if buy date is close to expiration date (within 3 days)
+                            if 'expiration' in adj:
+                                days_diff = abs((buy_date - adj['expiration']).days)
+                                if days_diff <= 3:
+                                    # This buy matches the assignment in quantity and timing
+                                    buy_lot['assignment_adjustment'] = adj
+                                    buy_lot['assignment_key'] = adj_key
+                                    used_assignments.add(adj_key)
+                                    break
+
+                stock_positions[symbol].append(buy_lot)
             else:  # SELL
                 remaining_qty = trade['quantity']
 
@@ -249,10 +370,17 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     match_qty = min(remaining_qty, buy_lot['quantity'])
 
                     # Calculate P&L for this match
-                    # Use absolute values for prices, then multiply by quantity
-                    buy_price = abs(buy_lot['amount']) / buy_lot['quantity']
-                    sell_price = abs(trade['amount']) / trade['quantity']
-                    match_pl = (sell_price - buy_price) * match_qty
+                    # Check if this lot has an assignment adjustment
+                    if 'assignment_adjustment' in buy_lot:
+                        # Use adjusted cost basis
+                        adj = buy_lot['assignment_adjustment']
+                        buy_price = adj['adjusted_cost']
+                        match_pl = (abs(trade['amount']) / trade['quantity'] - buy_price) * match_qty
+                    else:
+                        # Use actual buy price
+                        buy_price = abs(buy_lot['amount']) / buy_lot['quantity']
+                        sell_price = abs(trade['amount']) / trade['quantity']
+                        match_pl = (sell_price - buy_price) * match_qty
 
                     stocks_pl += match_pl
 
