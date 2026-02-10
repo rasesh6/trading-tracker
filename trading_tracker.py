@@ -297,6 +297,10 @@ def calculate_pl_from_history(start_date=None, end_date=None):
             # Check if contract is still open in portfolio
             is_closed = contract not in open_in_portfolio
 
+            # EXCLUDE assigned put from options P&L (premium counted in stock cost basis)
+            if contract == 'SOXL260130P00065000':
+                continue
+
             if is_closed:
                 # Closed position - P&L = buy + sell
                 pl = data['buy'] + data['sell']
@@ -414,11 +418,12 @@ def calculate_pl_from_history(start_date=None, end_date=None):
 
         ytd_realized_pl = stocks_pl + options_pl
 
-        # Calculate unrealized P&L
+        # Calculate unrealized P&L from costBasis.gainValue
         total_unrealized_pl = 0
         if 'positions' in portfolio:
             for pos in portfolio['positions']:
-                unrealized = float(pos.get('unrealizedProfitLoss', 0))
+                cost_basis = pos.get('costBasis', {})
+                unrealized = float(cost_basis.get('gainValue', 0))
                 total_unrealized_pl += unrealized
 
         result = {
