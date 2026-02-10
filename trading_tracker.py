@@ -248,9 +248,10 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     match_qty = min(remaining_qty, buy_lot['quantity'])
 
                     # Calculate P&L for this match
-                    buy_per_share = buy_lot['amount'] / buy_lot['quantity']
-                    sell_per_share = trade['amount'] / trade['quantity']
-                    match_pl = (sell_per_share - buy_per_share) * match_qty
+                    # Use absolute values for prices, then multiply by quantity
+                    buy_price = abs(buy_lot['amount']) / buy_lot['quantity']
+                    sell_price = abs(trade['amount']) / trade['quantity']
+                    match_pl = (sell_price - buy_price) * match_qty
 
                     stocks_pl += match_pl
 
