@@ -182,6 +182,8 @@ def calculate_pl_from_history(start_date=None, end_date=None):
             buys = sorted(data['buys'], key=lambda x: x['timestamp'])
             sells = sorted(data['sells'], key=lambda x: x['timestamp'])
 
+            print(f"DEBUG {symbol}: {len(buys)} BUYs, {len(sells)} SELLs")
+
             # Match pairs using LIFO - match SELLs against MOST RECENT BUYs
             while buys and sells:
                 sell = sells[0]
@@ -192,6 +194,8 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                 # P&L = buy_amount + sell_amount (both are signed)
                 # Assignment premium is already deducted from buy_amount
                 pl = buy['amount'] + sell['amount']
+
+                print(f"  MATCH: BUY {buy['amount']:.2f} + SELL {sell['amount']:.2f} = {pl:.2f}")
 
                 closed_positions.append({
                     'symbol': symbol,
