@@ -147,11 +147,22 @@ def calculate_pl_from_history(start_date=None, end_date=None):
 
             symbol = parts[2]  # e.g., "SOXL" or "SOXL260130P00065000"
 
-            if symbol not in by_symbol:
-                by_symbol[symbol] = {'buys': [], 'sells': [], 'all_transactions': []}
+            # For options, use the full option symbol as key to prevent mixing different contracts
+            # For stocks, just use the stock symbol
+            # Check if it's an option symbol (format: UNDERLYING2YYMMDD[CP]STRIKE)
+            option_match = re.match(r'^([A-Z]+)2\d{6}[CP]\d{8}$', symbol)
+            if option_match:
+                # It's an option - use full symbol as key
+                key = symbol
+            else:
+                # It's a stock - use symbol as key
+                key = symbol
+
+            if key not in by_symbol:
+                by_symbol[key] = {'buys': [], 'sells': [], 'all_transactions': []}
 
             if 'BUY' in description:
-                by_symbol[symbol]['buys'].append({
+                by_symbol[key]['buys'].append({
                     'amount': net_amount,
                     'timestamp': timestamp,
                     'description': description,
@@ -159,7 +170,7 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     'type': 'stock_pnl'
                 })
             elif 'SELL' in description:
-                by_symbol[symbol]['sells'].append({
+                by_symbol[key]['sells'].append({
                     'amount': net_amount,
                     'timestamp': timestamp,
                     'description': description,
@@ -167,7 +178,7 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     'type': 'stock_pnl'
                 })
 
-            by_symbol[symbol]['all_transactions'].append({
+            by_symbol[key]['all_transactions'].append({
                 'netAmount': net_amount,
                 'description': description,
                 'timestamp': timestamp
@@ -178,7 +189,11 @@ def calculate_pl_from_history(start_date=None, end_date=None):
         closed_positions = []
         completed_transactions = []
 
-        for symbol, data in by_symbol.items():
+        for key, data in by_symbol.items():
+            # Extract display symbol from key
+            # For options, key is the full option symbol
+            # For stocks, key is just the stock symbol
+            display_symbol = key.split()[0] if ' ' in key else key
             # Sort by timestamp
             buys = sorted(data['buys'], key=lambda x: x['timestamp'])
             sells = sorted(data['sells'], key=lambda x: x['timestamp'])
@@ -211,7 +226,7 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     pl = match_amount + sell_match_amount
 
                     closed_positions.append({
-                        'symbol': symbol,
+                        'symbol': key,
                         'opening': buy,
                         'closing': sell,
                         'pl': pl,
@@ -222,10 +237,10 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     # Add to completed transactions for display
                     completed_transactions.append({
                         'netAmount': pl,
-                        'description': f"Closed Position: {symbol} {match_qty} shares",
+                        'description': f"Closed Position: {key} {match_qty} shares",
                         'timestamp': sell['timestamp'],
                         'type': 'stock_pnl',
-                        'symbol': symbol
+                        'symbol': key
                     })
 
                     # Update remaining quantities
@@ -238,7 +253,7 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     else:
                         # Partially used - update quantity and amount
                         remaining_buy_qty = buy_qty - match_qty
-                        buy_queue[-1]['description'] = f"BUY {remaining_buy_qty} {symbol}"
+                        buy_queue[-1]['description'] = f"BUY {remaining_buy_qty} {key}"
                         buy_queue[-1]['amount'] = buy_amount_per_share * remaining_buy_qty
                         break  # Sell is fully matched, move to next sell
 
@@ -844,7 +859,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '4.1 (FIX: Match BUY/SELL by quantity using LIFO. Previous version matched whole transactions ignoring quantities. Now properly matches by share count with LIFO.)'
+        'version': '4.2 (FIX: Properly separate stocks and options by using full option symbol as key. Options now grouped by contract, stocks by symbol.)'
     })
 
 @app.route('/api/debug/stock_trades')
