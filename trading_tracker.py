@@ -97,7 +97,7 @@ def fetch_order_history(token, account_id, start_date, end_date):
     return response.json()
 
 def calculate_pl_from_history(start_date=None, end_date=None):
-    """Calculate P&L for given date range (or YTD if not specified) - SIMPLE VERSION"""
+    """Calculate P&L by tracking position state - CLEAN VERSION"""
     global _history_cache, _cache_time
 
     # Cache only for default YTD call
@@ -115,21 +115,37 @@ def calculate_pl_from_history(start_date=None, end_date=None):
         if start_date is None:
             start_date = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         if end_date is None:
-            # Use end of current day (23:59:59 UTC) to capture all transactions today
             end_date = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
         # Fetch YTD transactions
         history = fetch_order_history(token, account_id, start_date, end_date)
         transactions = history.get('transactions', [])
 
-        # SIMPLE APPROACH:
-        # 1. Group transactions by symbol
-        # 2. Match BUY and SELL pairs
-        # 3. For each closed pair: P&L = buy_amount + sell_amount
-        # 4. If missing BUY (from 2025 assignment), fetch from 2025
-        # 5. Sum up for YTD and MTD
+        # Fetch portfolio to check what's open
+        portfolio_response = get(
+            f'https://api.public.com/userapigateway/trading/{account_id}/portfolio',
+            headers={'Authorization': f'Bearer {token}'}
+        )
+        portfolio = portfolio_response.json()
 
-        by_symbol = {}
+        # Get currently open symbols from portfolio
+        open_in_portfolio = set()
+        if 'positions' in portfolio:
+            for pos in portfolio['positions']:
+                instrument = pos.get('instrument', {})
+                symbol = instrument.get('symbol', '')
+                inst_type = instrument.get('type', '')
+
+                # For options: full symbol, for stocks: just symbol
+                if inst_type == 'OPTION':
+                    open_in_portfolio.add(symbol)
+                elif inst_type == 'EQUITY':
+                    open_in_portfolio.add(symbol)
+
+        # === Parse transactions ===
+        option_contracts = {}  # contract -> {buy_total, sell_total, transactions}
+        stock_trades = []       # list of stock trades
+
         for tx in transactions:
             tx_type = tx.get('type', '')
             sub_type = tx.get('subType', '')
@@ -140,608 +156,150 @@ def calculate_pl_from_history(start_date=None, end_date=None):
             description = tx.get('description', '')
             timestamp = tx.get('timestamp', '')
 
-            # Extract symbol (works for both stocks and options)
-            parts = description.split()
-            if len(parts) < 3:
-                continue
-
-            symbol = parts[2]  # e.g., "SOXL" or "SOXL260130P00065000"
-
-            # For options, use the full option symbol as key to prevent mixing different contracts
-            # For stocks, just use the stock symbol
-            # Check if it's an option symbol (format: UNDERLYING2YYMMDD[CP]STRIKE)
-            option_match = re.match(r'^([A-Z]+)2\d{6}[CP]\d{8}$', symbol)
+            # Check if option
+            option_match = re.search(r'([A-Z]+)2\d{6}[CP]\d{8}', description)
             if option_match:
-                # It's an option - use full symbol as key
-                key = symbol
-            else:
-                # It's a stock - use symbol as key
-                key = symbol
-
-            if key not in by_symbol:
-                by_symbol[key] = {'buys': [], 'sells': [], 'all_transactions': []}
-
-            if 'BUY' in description:
-                by_symbol[key]['buys'].append({
-                    'amount': net_amount,
-                    'timestamp': timestamp,
-                    'description': description,
-                    'netAmount': net_amount,
-                    'type': 'stock_pnl'
-                })
-            elif 'SELL' in description:
-                by_symbol[key]['sells'].append({
-                    'amount': net_amount,
-                    'timestamp': timestamp,
-                    'description': description,
-                    'netAmount': net_amount,
-                    'type': 'stock_pnl'
-                })
-
-            by_symbol[key]['all_transactions'].append({
-                'netAmount': net_amount,
-                'description': description,
-                'timestamp': timestamp
-            })
-
-        # Match buys and sells for closed positions using LIFO (Last In, First Out)
-        # Match by QUANTITY - a partial close is possible
-        closed_positions = []
-        completed_transactions = []
-
-        for key, data in by_symbol.items():
-            # Extract display symbol from key
-            # For options, key is the full option symbol
-            # For stocks, key is just the stock symbol
-            display_symbol = key.split()[0] if ' ' in key else key
-            # Sort by timestamp
-            buys = sorted(data['buys'], key=lambda x: x['timestamp'])
-            sells = sorted(data['sells'], key=lambda x: x['timestamp'])
-
-            # Match using LIFO with quantity tracking
-            buy_queue = buys.copy()  # Queue of available buys
-
-            for sell in sells:
-                try:
-                    remaining_sell_qty = abs(int(sell['description'].split()[1]))
-                except:
-                    continue  # Skip if can't parse quantity
-
-                remaining_sell_amount = sell['amount']
-
-                # Match against most recent buys (LIFO)
-                while remaining_sell_qty > 0 and buy_queue:
-                    # LIFO: take the MOST recent BUY (last in list)
-                    buy = buy_queue[-1]
-                    buy_qty = int(buy['description'].split()[1])
-                    buy_amount_per_share = buy['amount'] / buy_qty
-
-                    # Match quantity
-                    match_qty = min(remaining_sell_qty, buy_qty)
-                    match_amount = buy_amount_per_share * match_qty
-                    sell_amount_per_share = sell['amount'] / abs(int(sell['description'].split()[1]))
-                    sell_match_amount = sell_amount_per_share * match_qty
-
-                    # P&L for this match
-                    pl = match_amount + sell_match_amount
-
-                    closed_positions.append({
-                        'symbol': key,
-                        'opening': buy,
-                        'closing': sell,
-                        'pl': pl,
-                        'close_date': sell['timestamp'],
-                        'quantity': match_qty
-                    })
-
-                    # Add to completed transactions for display
-                    completed_transactions.append({
-                        'netAmount': pl,
-                        'description': f"Closed Position: {key} {match_qty} shares",
-                        'timestamp': sell['timestamp'],
-                        'type': 'stock_pnl',
-                        'symbol': key
-                    })
-
-                    # Update remaining quantities
-                    remaining_sell_qty -= match_qty
-
-                    # Update or remove the BUY from queue
-                    if match_qty == buy_qty:
-                        # Fully used - remove from queue
-                        buy_queue.pop()
-                    else:
-                        # Partially used - update quantity and amount
-                        remaining_buy_qty = buy_qty - match_qty
-                        buy_queue[-1]['description'] = f"BUY {remaining_buy_qty} {key}"
-                        buy_queue[-1]['amount'] = buy_amount_per_share * remaining_buy_qty
-                        break  # Sell is fully matched, move to next sell
-
-            # If we have leftover sells without matching buys,
-            # these are from 2025 assignments - fetch 2025 history
-            while sells:
-                sell = sells[0]
-
-                # Fetch 2025 history to find the opening BUY transaction
-                # The stock was opened by assignment from a put sold in 2025
-                history_2025 = fetch_order_history(
-                    token,
-                    account_id,
-                    datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-                    datetime(2025, 12, 31, 23, 59, 59, tzinfo=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-                )
-                transactions_2025 = history_2025.get('transactions', [])
-
-                # Find the matching BUY transaction (assignment) in 2025
-                for tx_2025 in transactions_2025:
-                    desc_2025 = tx_2025.get('description', '')
-                    if symbol in desc_2025 and 'BUY' in desc_2025:
-                        # Check if quantities match
-                        parts_2025 = desc_2025.split()
-                        if len(parts_2025) >= 3:
-                            try:
-                                qty_2025 = int(parts_2025[1])
-                                if qty_2025 == abs(int(sell['description'].split()[1])):
-                                    # Found the opening BUY from assignment
-                                    buy_amount = float(tx_2025.get('netAmount', 0))
-                                    pl = buy_amount + sell['amount']
-
-                                    closed_positions.append({
-                                        'symbol': symbol,
-                                        'opening': {
-                                            'amount': buy_amount,
-                                            'timestamp': tx_2025.get('timestamp', ''),
-                                            'description': desc_2025
-                                        },
-                                        'closing': sell,
-                                        'pl': pl,
-                                        'close_date': sell['timestamp']
-                                    })
-
-                                    completed_transactions.append({
-                                        'netAmount': pl,
-                                        'description': f"Closed Position: {symbol} (opened from 2025 assignment)",
-                                        'timestamp': sell['timestamp'],
-                                        'type': 'stock_pnl',
-                                        'symbol': symbol
-                                    })
-
-                                    print(f"Found 2025 assignment for {symbol}: {desc_2025}")
-                                    break
-                            except:
-                                continue
-
-                sells.pop(0)
-
-        # Calculate YTD and MTD totals
-        now_dt = datetime.now(timezone.utc)
-        current_month = now_dt.month
-        current_year = now_dt.year
-
-        ytd_realized_pl = sum(pos['pl'] for pos in closed_positions)
-        mtd_realized_pl = sum(
-            pos['pl'] for pos in closed_positions
-            if datetime.fromisoformat(pos['close_date'].replace('Z', '+00:00')).month == current_month
-            and datetime.fromisoformat(pos['close_date'].replace('Z', '+00:00')).year == current_year
-        )
-
-        # Calculate unrealized P&L from portfolio
-        total_unrealized_pl = 0
-        # TODO: Fetch portfolio and calculate unrealized
-
-        result = {
-            'total_realized_pl': ytd_realized_pl,
-            'short_term_pl': ytd_realized_pl,
-            'long_term_pl': 0,
-            'total_unrealized_pl': total_unrealized_pl,
-            'total_positions': len(closed_positions),
-            'open_positions': 0,  # TODO: Count open positions
-            'transactions': completed_transactions,
-            'last_updated': now.isoformat()
-        }
-
-        _history_cache = result
-        _cache_time = datetime.now()
-
-        return result
-
-        # Fetch Portfolio API to identify currently OPEN positions
-        portfolio_response = get(
-            f'https://api.public.com/userapigateway/trading/{account_id}/portfolio',
-            headers={'Authorization': f'Bearer {token}'}
-        )
-        portfolio = portfolio_response.json()
-
-        # Extract currently open option positions from Portfolio
-        open_in_portfolio = set()
-        if 'positions' in portfolio:
-            for pos in portfolio['positions']:
-                symbol = pos.get('symbol', '')
-                if re.match(r'[A-Z]+2\d{2}\d{3}[CP]\d{8}', symbol):
-                    open_in_portfolio.add(symbol)
-
-        # Separate options (track each FULL CONTRACT individually) and stocks (LIFO)
-        # KEY: Each option contract is identified by its FULL OCC symbol
-        # Example: NFLX260320P00074000 and NFLX260320P00080000 are TWO DIFFERENT contracts
-        option_contracts = {}
-        stock_trades = []
-
-        for tx in transactions:
-            tx_type = tx.get('type', '')
-            sub_type = tx.get('subType', '')
-
-            if tx_type != 'TRADE' or sub_type != 'TRADE':
-                continue
-
-            net_amount = float(tx.get('netAmount') or 0)
-            description = tx.get('description', '')
-            timestamp = tx.get('timestamp', '')
-
-            match = re.search(r'([A-Z]+2\d{2}\d{3}[CP]\d{8})', description)
-            if match:
-                # Use FULL CONTRACT symbol as key (this is the unique identifier)
-                contract = match.group(1)
+                # Option - use full contract symbol
+                contract = option_match.group(1) + '2' + description.split(option_match.group(1))[1][:9]
 
                 if contract not in option_contracts:
-                    option_contracts[contract] = {
-                        'buy': 0,
-                        'sell': 0,
-                        'transactions': [],
-                        'in_portfolio': False,
-                        'has_buy': False,
-                        'has_sell': False
-                    }
+                    option_contracts[contract] = {'buy': 0, 'sell': 0, 'transactions': []}
 
                 if 'BUY' in description:
                     option_contracts[contract]['buy'] += net_amount
-                    option_contracts[contract]['has_buy'] = True
                 else:
                     option_contracts[contract]['sell'] += net_amount
-                    option_contracts[contract]['has_sell'] = True
 
                 option_contracts[contract]['transactions'].append({
-                    'description': description,
                     'netAmount': net_amount,
+                    'description': description,
                     'timestamp': timestamp
                 })
             else:
+                # Stock
                 parts = description.split()
                 if len(parts) >= 3:
                     side = 'BUY' if 'BUY' in description else 'SELL'
                     try:
                         qty = int(parts[1])
+                        symbol = parts[2]
+                        stock_trades.append({
+                            'symbol': symbol,
+                            'side': side,
+                            'quantity': qty,
+                            'amount': net_amount,
+                            'timestamp': timestamp,
+                            'description': description
+                        })
                     except (ValueError, IndexError):
-                        qty = 0
-                    symbol = parts[2]
-                    stock_trades.append({
-                        'symbol': symbol,
-                        'side': side,
-                        'quantity': qty,
-                        'amount': net_amount,
-                        'timestamp': timestamp,
-                        'description': description
-                    })
+                        continue
 
-        # Check which individual option contracts are currently OPEN in portfolio
-        # This is critical: must check by FULL CONTRACT symbol, not grouped
-        open_contracts_in_portfolio = set()
-        if 'positions' in portfolio:
-            for pos in portfolio['positions']:
-                instrument = pos.get('instrument', {})
-                symbol = instrument.get('symbol', '')
-                # Extract full option contract symbol if present
-                # Portfolio format: UNDERLYANDINGYYMMDD(C/P)STRIKE*1000
-                # Example: NFLX260320P00074000 (no separate version digit)
-                contract_match = re.search(r'([A-Z]+\d{6}[CP]\d{8})', symbol)
-                if contract_match:
-                    open_contracts_in_portfolio.add(contract_match.group(1))
-
-        # Mark each contract as open/closed based on portfolio
-        for contract in option_contracts:
-            # Check if exact contract is in portfolio
-            option_contracts[contract]['in_portfolio'] = contract in open_contracts_in_portfolio
-
-        # FIXED: Do NOT mark expired options as "open" just because underlying stock exists
-        # The portfolio check at lines 165-176 already correctly identifies which option
-        # contracts are still in portfolio. Expired options that are NOT in portfolio
-        # should be counted as CLOSED with realized P&L, regardless of underlying stock.
-        # This bug was causing expired options like SOXL260130P00065000 (+$1302.63)
-        # to be incorrectly excluded from realized P&L.
-
-        # FIRST: Calculate assignment adjustments (needed for options P&L exclusion)
-        # Track assignment cost basis adjustments from short option assignments
-        # Format: {symbol: {quantity: shares, premium_total: float, strike: float, premium_per_share: float, option_keys: [keys]}}
-        assignment_adjustments = {}
-        # Track which option groups were assigned (for exclusion from options P&L)
-        assigned_option_keys = set()
-
-        # Analyze sell-only option contracts to detect potential assignments (only in YTD)
-        for contract, data in option_contracts.items():
-            has_buy = data['buy'] != 0
-            has_sell = data['sell'] != 0
-
-            # If sell-only (short option), it may have been assigned
-            if has_sell and not has_buy:
-                # Parse contract details from transactions
-                for tx in data['transactions']:
-                    desc = tx['description']
-                    # Parse format: "SELL 20 SOXL260130P00065000 at 0.65"
-                    # Extract: quantity(20), symbol(SOXL260130P00065000), price(0.65)
-                    parts = desc.split()
-                    if len(parts) >= 4 and parts[0] == 'SELL':
-                        try:
-                            qty = int(parts[1])
-                            option_symbol = parts[2]
-                            price_str = parts[4].replace('$', '').replace(',', '')
-                            price = float(price_str)
-
-                            # Parse option symbol to get underlying and strike
-                            # Format: UNDERLYINGYYMMDD(C/P)STRIKE*1000 (YYMMDD is 6 digits, NO separate version digit)
-                            m = re.match(r'([A-Z]+)(\d{6})([CP])(\d{8})', option_symbol)
-                            if m:
-                                underlying = m.group(1)
-                                strike = int(m.group(4)) / 1000  # Convert from cents
-                                contracts = qty
-                                shares = contracts * 100
-                                # CRITICAL FIX: Use actual netAmount from transaction, not parsed price
-                                # The parsed price (e.g., 0.65) may not include fees/commissions
-                                # netAmount is the actual premium received
-                                premium = abs(tx['netAmount'])
-
-                                # Store assignment data using full contract (including expiry) as key
-                                # This prevents lumping together different expiry dates
-                                assignment_key = option_symbol  # Full contract symbol
-                                if assignment_key not in assignment_adjustments:
-                                    assignment_adjustments[assignment_key] = {
-                                        'quantity': 0,
-                                        'premium_total': 0,
-                                        'strike': strike,
-                                        'premium_per_share': 0,
-                                        'option_keys': [],
-                                        'underlying': underlying  # Keep underlying for stock matching
-                                    }
-
-                                assignment_adjustments[assignment_key]['quantity'] += shares
-                                assignment_adjustments[assignment_key]['premium_total'] += premium
-                                assignment_adjustments[assignment_key]['option_keys'].append(contract)
-                                # Track this option group as assigned (will be excluded from options P&L)
-                                assigned_option_keys.add(contract)
-                        except (ValueError, IndexError):
-                            continue
-
-        # Calculate premium per share for each assignment
-        for contract_key in assignment_adjustments:
-            adj = assignment_adjustments[contract_key]
-            if adj['quantity'] > 0:
-                adj['premium_per_share'] = adj['premium_total'] / adj['quantity']
-
-        # Reorganize by underlying symbol for easier stock matching
-        # Create a mapping: underlying -> list of assignments
-        assignments_by_symbol = {}
-        for contract_key, adj in assignment_adjustments.items():
-            underlying = adj['underlying']
-            if underlying not in assignments_by_symbol:
-                assignments_by_symbol[underlying] = []
-            assignments_by_symbol[underlying].append({
-                'quantity': adj['quantity'],
-                'premium_total': adj['premium_total'],
-                'strike': adj['strike'],
-                'contract_key': contract_key
-            })
-
-        # Calculate options P&L (tracking each contract individually)
+        # === Calculate Option P&L ===
         options_pl = 0
         completed_transactions = []
-        closed_option_contracts = 0
-        open_option_contracts = 0
 
         for contract, data in option_contracts.items():
-            has_buy = data['buy'] != 0
-            has_sell = data['sell'] != 0
-            is_in_portfolio = data['in_portfolio']
+            # Check if contract is still open in portfolio
+            is_closed = contract not in open_in_portfolio
 
-            # CRITICAL: Exclude assigned options from options P&L
-            # Assigned options create stock positions and are accounted for in stock P&L
-            if contract in assigned_option_keys:
-                continue  # Skip this contract - it's handled in stock P&L
+            if is_closed:
+                # Closed position - P&L = buy + sell
+                pl = data['buy'] + data['sell']
+                options_pl += pl
 
-            # Count as CLOSED if:
-            # 1. Both buy and sell in YTD, OR
-            # 2. Only buy or only sell BUT NOT in portfolio (expired/worthless or closed early)
-            if not is_in_portfolio:
-                # Contract is closed (both sides in YTD, or expired/closed early)
-                options_pl += data['buy'] + data['sell']
-                completed_transactions.extend(data['transactions'])
-                if has_buy or has_sell:
-                    closed_option_contracts += 1
-            elif is_in_portfolio:
-                # Contract is still open in portfolio
-                open_option_contracts += 1
+                # Add all transactions to completed list
+                for tx in data['transactions']:
+                    completed_transactions.append({
+                        'netAmount': tx['netAmount'],
+                        'description': tx['description'],
+                        'timestamp': tx['timestamp'],
+                        'type': 'option_pnl',
+                        'symbol': contract
+                    })
 
-        # Calculate unrealized P&L from portfolio API (using cost basis)
-        total_unrealized_pl = 0
-        if 'positions' in portfolio:
-            for pos in portfolio['positions']:
-                current_value = float(pos.get('currentValue', 0))
-                cost_basis_dict = pos.get('costBasis', {})
-
-                # Parse cost basis (it's a string representation of dict)
-                if isinstance(cost_basis_dict, str):
-                    import ast
-                    try:
-                        cost_basis_dict = ast.literal_eval(cost_basis_dict)
-                    except:
-                        cost_basis_dict = {}
-
-                total_cost = float(cost_basis_dict.get('totalCost', 0))
-
-                # Unrealized P&L = current value - cost basis
-                # For short positions (negative quantity): cost is negative, so (value - cost) works correctly
-                unrealized = current_value - total_cost
-                total_unrealized_pl += unrealized
-
-        # Build a map of portfolio cost basis for stock positions
-        # This helps detect assignments that happened before YTD
-        portfolio_cost_basis = {}
-        for pos in portfolio.get('positions', []):
-            instrument = pos.get('instrument', {})
-            inst_type = instrument.get('type', '')
-            if inst_type == 'EQUITY':
-                symbol = instrument.get('symbol', '')
-                cost_basis_dict = pos.get('costBasis', {})
-                if isinstance(cost_basis_dict, str):
-                    import ast
-                    try:
-                        cost_basis_dict = ast.literal_eval(cost_basis_dict)
-                    except:
-                        cost_basis_dict = {}
-
-                total_cost = float(cost_basis_dict.get('totalCost', 0))
-                quantity = float(pos.get('quantity', 0))
-
-                if quantity > 0 and total_cost > 0:
-                    portfolio_cost_basis[symbol] = {
-                        'total_cost': total_cost,
-                        'quantity': quantity,
-                        'cost_per_share': total_cost / quantity
-                    }
-
-        stock_trades.sort(key=lambda x: x['timestamp'])
-        stock_positions = {}
+        # === Calculate Stock P&L using LIFO ===
         stocks_pl = 0
-        closed_stock_positions = 0
-        open_stock_positions = 0
+        stock_positions = {}  # symbol -> list of buy lots (LIFO stack)
+
+        # Sort stock trades by timestamp
+        stock_trades.sort(key=lambda x: x['timestamp'])
 
         for trade in stock_trades:
             symbol = trade['symbol']
+
             if symbol not in stock_positions:
                 stock_positions[symbol] = []
 
             if trade['side'] == 'BUY':
-                amount = trade['amount']
-                original_amount = amount
-                cost_basis_source = None
-
-                # Check if this BUY matches a YTD assignment (need to adjust cost basis)
-                if symbol in assignments_by_symbol:
-                    for adj in assignments_by_symbol[symbol]:
-                        if trade['quantity'] == adj['quantity']:
-                            # This is a YTD assignment - adjust cost basis
-                            cost_adjustment = adj['premium_total']
-                            amount = amount + cost_adjustment  # Add premium to reduce negative amount
-                            cost_basis_source = 'ytd_assignment'
-                            break
-
-                # For all other cases (regular buys, pre-YTD assignments already adjusted):
-                # Use the amount as-is from the transaction
-                # Pre-YTD assignments already have adjusted cost basis in the transaction
-                # Regular buys have normal market prices
-
+                # Add to position (LIFO = append to end, pop from end)
                 stock_positions[symbol].append({
                     'quantity': trade['quantity'],
-                    'amount': amount,
-                    'original_amount': original_amount,
-                    'description': trade['description'],
+                    'amount': trade['amount'],
                     'timestamp': trade['timestamp'],
-                    'side': 'BUY',  # These are BUY positions for LIFO matching
-                    'cost_basis_source': cost_basis_source,
-                    'original_quantity': trade['quantity']  # Preserve for completed_transactions
+                    'description': trade['description']
                 })
-            else:
+            else:  # SELL
                 remaining_qty = trade['quantity']
-                sell_amount_per_share = abs(trade['amount'] / trade['quantity'])
 
+                # Match against open positions using LIFO (take from end)
                 while remaining_qty > 0 and stock_positions[symbol]:
-                    buy_trade = stock_positions[symbol][-1]  # LIFO: take most recent BUY
-                    match_qty = min(remaining_qty, buy_trade['quantity'])
-                    buy_amount_per_share = abs(buy_trade['amount'] / buy_trade['quantity'])
-                    match_pl = (sell_amount_per_share - buy_amount_per_share) * match_qty
+                    buy_lot = stock_positions[symbol][-1]  # LIFO: most recent
 
-                    # Check if this stock position came from an assignment
-                    # For YTD assignments: subtract premium from stock P&L (it's option P&L, not stock P&L)
-                    # For pre-YTD assignments: keep premium in P&L (already part of adjusted cost basis)
-                    assignment_premium = 0
-                    show_premium_in_desc = False
-                    if buy_trade.get('cost_basis_source') == 'ytd_assignment' and symbol in assignments_by_symbol:
-                        # Find the matching assignment
-                        for adj in assignments_by_symbol[symbol]:
-                            if buy_trade['quantity'] == adj['quantity']:
-                                premium_ratio = match_qty / buy_trade['quantity']
-                                assignment_premium = adj['premium_total'] * premium_ratio
-                                show_premium_in_desc = True
-                                break
+                    match_qty = min(remaining_qty, buy_lot['quantity'])
 
-                    stocks_pl += match_pl - assignment_premium
+                    # Calculate P&L for this match
+                    buy_per_share = buy_lot['amount'] / buy_lot['quantity']
+                    sell_per_share = trade['amount'] / trade['quantity']
+                    match_pl = (sell_per_share - buy_per_share) * match_qty
 
-                    # Add synthetic P&L transaction with closing date for chart
-                    # This ensures stock P&L is included in cumulative chart
-                    description = f'Stock P&L: {symbol} {match_qty} shares'
-                    if show_premium_in_desc and assignment_premium > 0:
-                        description += f' (includes assignment premium ${assignment_premium:.2f}, subtracted for P&L)'
+                    stocks_pl += match_pl
 
+                    # Add to completed transactions
                     completed_transactions.append({
-                        'netAmount': match_pl - assignment_premium,  # Subtract YTD assignment premium
-                        'description': description,
-                        'timestamp': trade['timestamp'],  # Closing date (SELL date)
+                        'netAmount': match_pl,
+                        'description': f"Stock P&L: {symbol} {match_qty} shares",
+                        'timestamp': trade['timestamp'],
                         'type': 'stock_pnl',
                         'symbol': symbol
                     })
 
+                    # Update quantities
                     remaining_qty -= match_qty
-                    buy_trade['quantity'] -= match_qty
+                    buy_lot['quantity'] -= match_qty
 
-                    if buy_trade['quantity'] == 0:
-                        stock_positions[symbol].pop()  # LIFO: remove from end
-                        closed_stock_positions += 1
+                    # Remove fully used lots
+                    if buy_lot['quantity'] == 0:
+                        stock_positions[symbol].pop()
 
-                if remaining_qty > 0:
-                    stock_positions[symbol].append({
-                        'quantity': remaining_qty,
-                        'amount': 0,
-                        'description': f"SHORT {remaining_qty} {symbol}",
-                        'timestamp': trade['timestamp']
-                    })
+        # Calculate MTD from completed transactions
+        now_dt = datetime.now(timezone.utc)
+        current_month = now_dt.month
+        current_year = now_dt.year
 
-        for symbol, queue in stock_positions.items():
-            open_stock_positions += len(queue)
+        mtd_realized_pl = sum(
+            tx['netAmount'] for tx in completed_transactions
+            if datetime.fromisoformat(tx['timestamp'].replace('Z', '+00:00')).month == current_month
+            and datetime.fromisoformat(tx['timestamp'].replace('Z', '+00:00')).year == current_year
+        )
 
-        # Count ALL open positions from portfolio (including those opened before YTD)
-        # Portfolio already has current open positions regardless of when they were opened
-        portfolio_open_count = 0
+        ytd_realized_pl = stocks_pl + options_pl
+
+        # Calculate unrealized P&L
+        total_unrealized_pl = 0
         if 'positions' in portfolio:
-            # Group option positions by underlying_expiry to count spreads as 1
-            portfolio_option_groups = set()
-            portfolio_stock_count = 0
-
             for pos in portfolio['positions']:
-                instrument = pos.get('instrument', {})
-                symbol = instrument.get('symbol', '')
-                inst_type = instrument.get('type', '')
-
-                if inst_type == 'OPTION':
-                    # Group by underlying_expiry (e.g., "WMT_260206")
-                    m = re.match(r'([A-Z]+)(\d{6})([CP])(\d{8})', symbol)
-                    if m:
-                        group_key = f'{m.group(1)}_{m.group(2)}'
-                        portfolio_option_groups.add(group_key)
-                elif inst_type == 'EQUITY':
-                    # Stock position
-                    portfolio_stock_count += 1
-
-            portfolio_open_count = len(portfolio_option_groups) + portfolio_stock_count
-
-        total_realized_pl = options_pl + stocks_pl
-        # total_unrealized_pl already calculated from portfolio API above
+                unrealized = float(pos.get('unrealizedProfitLoss', 0))
+                total_unrealized_pl += unrealized
 
         result = {
-            'total_realized_pl': total_realized_pl,
-            'stocks_pl': stocks_pl,  # Stock P&L using LIFO
-            'options_pl': options_pl,  # Option P&L
-            'short_term_pl': total_realized_pl,
+            'total_realized_pl': ytd_realized_pl,
+            'stocks_pl': stocks_pl,
+            'options_pl': options_pl,
+            'short_term_pl': ytd_realized_pl,
             'long_term_pl': 0,
             'total_unrealized_pl': total_unrealized_pl,
-            'total_positions': closed_option_contracts + closed_stock_positions,
-            'open_positions': portfolio_open_count,  # Use actual portfolio count
+            'total_positions': len(completed_transactions),
+            'open_positions': len(open_in_portfolio),
             'transactions': completed_transactions,
             'last_updated': now.isoformat()
         }
@@ -859,7 +417,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '4.2 (FIX: Properly separate stocks and options by using full option symbol as key. Options now grouped by contract, stocks by symbol.)'
+        'version': '5.0 (COMPLETE REWRITE: Clean position state tracking. Options: sum transactions for closed contracts. Stocks: LIFO matching with proper position state. Handles partial closes correctly.)'
     })
 
 @app.route('/api/debug/stock_trades')
