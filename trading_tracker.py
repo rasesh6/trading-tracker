@@ -436,27 +436,27 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     match_qty = min(remaining_qty, buy_trade['quantity'])
                     buy_amount_per_share = abs(buy_trade['amount'] / buy_trade['quantity'])
                     match_pl = (sell_amount_per_share - buy_amount_per_share) * match_qty
-                    stocks_pl += match_pl
 
-                    # Check if this stock position came from an assignment
-                    # Cost basis was already reduced by premium, so no additional calculation needed
+                    # Check if this stock position came from a YTD assignment
+                    # If so, subtract the premium from stock P&L (it's option P&L, not stock P&L)
                     assignment_premium = 0
                     if buy_trade.get('cost_basis_source') == 'ytd_assignment' and symbol in assignments_by_symbol:
-                        # Find the matching assignment
                         for adj in assignments_by_symbol[symbol]:
                             if buy_trade['quantity'] == adj['quantity']:
-                                premium_ratio = match_qty / adj['quantity']
+                                premium_ratio = match_qty / buy_trade['quantity']
                                 assignment_premium = adj['premium_total'] * premium_ratio
                                 break
+
+                    stocks_pl += match_pl - assignment_premium
 
                     # Add synthetic P&L transaction with closing date for chart
                     # This ensures stock P&L is included in cumulative chart
                     description = f'Stock P&L: {symbol} {match_qty} shares'
                     if assignment_premium > 0:
-                        description += f' (includes assignment premium ${assignment_premium:.2f})'
+                        description += f' (includes assignment premium ${assignment_premium:.2f}, subtracted for P&L)'
 
                     completed_transactions.append({
-                        'netAmount': match_pl,  # P&L includes assignment benefit via adjusted cost basis
+                        'netAmount': match_pl - assignment_premium,  # Subtract YTD assignment premium
                         'description': description,
                         'timestamp': trade['timestamp'],  # Closing date (SELL date)
                         'type': 'stock_pnl',
