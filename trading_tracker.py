@@ -396,7 +396,7 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                 original_amount = amount
                 cost_basis_from_portfolio = None
 
-                # Check assignments for this symbol
+                # Check assignments for this symbol (YTD assignments)
                 if symbol in assignments_by_symbol:
                     for adj in assignments_by_symbol[symbol]:
                         # Match by exact quantity
@@ -407,15 +407,18 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                             cost_basis_from_portfolio = 'ytd_assignment'
                             break  # Use first matching assignment
 
-                # Second, check if this BUY matches a portfolio position (pre-YTD assignment)
-                if cost_basis_from_portfolio is None and symbol in portfolio_cost_basis:
-                    pf = portfolio_cost_basis[symbol]
-                    # Check if the quantity matches exactly (assignment creates specific lot)
-                    if trade['quantity'] == pf['quantity']:
-                        # Use portfolio cost basis instead of transaction amount
-                        # The portfolio already includes the assignment adjustment
-                        amount = pf['total_cost']
-                        cost_basis_from_portfolio = 'portfolio'
+                # Detect pre-YTD assignments from transaction history itself
+                # If BUY quantity/price matches an assignment pattern, it's a pre-YTD assignment
+                if cost_basis_from_portfolio is None and symbol in assignments_by_symbol:
+                    for adj in assignments_by_symbol[symbol]:
+                        if trade['quantity'] == adj['quantity']:
+                            # Check if cost basis matches: strike * quantity - premium
+                            expected_cost = adj['strike'] * trade['quantity'] - adj['premium_total']
+                            # Allow small floating point difference
+                            if abs(amount - (-expected_cost)) < 1:
+                                # This is a pre-YTD assignment with adjusted cost basis
+                                cost_basis_from_portfolio = 'pre_ytd_assignment'
+                                break
 
                 stock_positions[symbol].append({
                     'quantity': trade['quantity'],
@@ -437,14 +440,18 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     buy_amount_per_share = abs(buy_trade['amount'] / buy_trade['quantity'])
                     match_pl = (sell_amount_per_share - buy_amount_per_share) * match_qty
 
-                    # Check if this stock position came from a YTD assignment
-                    # If so, subtract the premium from stock P&L (it's option P&L, not stock P&L)
+                    # Check if this stock position came from an assignment
+                    # For YTD assignments: subtract premium from stock P&L (it's option P&L, not stock P&L)
+                    # For pre-YTD assignments: keep premium in P&L (already part of adjusted cost basis)
                     assignment_premium = 0
+                    show_premium_in_desc = False
                     if buy_trade.get('cost_basis_source') == 'ytd_assignment' and symbol in assignments_by_symbol:
+                        # Find the matching assignment
                         for adj in assignments_by_symbol[symbol]:
                             if buy_trade['quantity'] == adj['quantity']:
                                 premium_ratio = match_qty / buy_trade['quantity']
                                 assignment_premium = adj['premium_total'] * premium_ratio
+                                show_premium_in_desc = True
                                 break
 
                     stocks_pl += match_pl - assignment_premium
@@ -452,7 +459,7 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     # Add synthetic P&L transaction with closing date for chart
                     # This ensures stock P&L is included in cumulative chart
                     description = f'Stock P&L: {symbol} {match_qty} shares'
-                    if assignment_premium > 0:
+                    if show_premium_in_desc and assignment_premium > 0:
                         description += f' (includes assignment premium ${assignment_premium:.2f}, subtracted for P&L)'
 
                     completed_transactions.append({
