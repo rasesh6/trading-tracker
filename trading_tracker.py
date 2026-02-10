@@ -156,11 +156,12 @@ def calculate_pl_from_history(start_date=None, end_date=None):
             description = tx.get('description', '')
             timestamp = tx.get('timestamp', '')
 
-            # Check if option
-            option_match = re.search(r'([A-Z]+)2\d{6}[CP]\d{8}', description)
+            # Check if option - format: UNDERLYINGYYMMDD[CP]STRIKE
+            # Example: SOXL260102P00046500
+            option_match = re.search(r'([A-Z]+\d{6}[CP]\d{8})', description)
             if option_match:
                 # Option - use full contract symbol
-                contract = option_match.group(1) + '2' + description.split(option_match.group(1))[1][:9]
+                contract = option_match.group(1)
 
                 if contract not in option_contracts:
                     option_contracts[contract] = {'buy': 0, 'sell': 0, 'transactions': []}
