@@ -174,6 +174,7 @@ def calculate_pl_from_history(start_date=None, end_date=None):
             })
 
         # Match buys and sells for closed positions using LIFO (Last In, First Out)
+        # Match by QUANTITY - a partial close is possible
         closed_positions = []
         completed_transactions = []
 
@@ -184,40 +185,62 @@ def calculate_pl_from_history(start_date=None, end_date=None):
 
             print(f"DEBUG {symbol}: {len(buys)} BUYs, {len(sells)} SELLs")
 
-            # Match pairs using LIFO - match SELLs against MOST RECENT BUYs
-            while buys and sells:
-                sell = sells[0]
+            # Match using LIFO with quantity tracking
+            buy_queue = buys.copy()  # Queue of available buys
 
-                # LIFO: take the MOST recent BUY (last in list)
-                buy = buys[-1]
+            for sell in sells:
+                remaining_sell_qty = abs(int(sell['description'].split()[1]))
+                remaining_sell_amount = sell['amount']
 
-                # P&L = buy_amount + sell_amount (both are signed)
-                # Assignment premium is already deducted from buy_amount
-                pl = buy['amount'] + sell['amount']
+                # Match against most recent buys (LIFO)
+                while remaining_sell_qty > 0 and buy_queue:
+                    # LIFO: take the MOST recent BUY (last in list)
+                    buy = buy_queue[-1]
+                    buy_qty = int(buy['description'].split()[1])
+                    buy_amount_per_share = buy['amount'] / buy_qty
 
-                print(f"  MATCH: BUY {buy['amount']:.2f} + SELL {sell['amount']:.2f} = {pl:.2f}")
+                    # Match quantity
+                    match_qty = min(remaining_sell_qty, buy_qty)
+                    match_amount = buy_amount_per_share * match_qty
+                    sell_amount_per_share = sell['amount'] / abs(int(sell['description'].split()[1]))
+                    sell_match_amount = sell_amount_per_share * match_qty
 
-                closed_positions.append({
-                    'symbol': symbol,
-                    'opening': buy,
-                    'closing': sell,
-                    'pl': pl,
-                    'close_date': sell['timestamp']
-                })
+                    # P&L for this match
+                    pl = match_amount + sell_match_amount
 
-                # Add to completed transactions for display
-                completed_transactions.append({
-                    'netAmount': pl,
-                    'description': f"Closed Position: {symbol}",
-                    'timestamp': sell['timestamp'],
-                    'type': 'stock_pnl',
-                    'symbol': symbol
-                })
+                    print(f"  MATCH: {match_qty} shares - BUY {match_amount:.2f} + SELL {sell_match_amount:.2f} = {pl:.2f}")
 
-                # Remove the matched BUY (LIFO - remove from end)
-                buys.pop()
-                # Remove the matched SELL (remove from beginning)
-                sells.pop(0)
+                    closed_positions.append({
+                        'symbol': symbol,
+                        'opening': buy,
+                        'closing': sell,
+                        'pl': pl,
+                        'close_date': sell['timestamp'],
+                        'quantity': match_qty
+                    })
+
+                    # Add to completed transactions for display
+                    completed_transactions.append({
+                        'netAmount': pl,
+                        'description': f"Closed Position: {symbol} {match_qty} shares",
+                        'timestamp': sell['timestamp'],
+                        'type': 'stock_pnl',
+                        'symbol': symbol
+                    })
+
+                    # Update remaining quantities
+                    remaining_sell_qty -= match_qty
+
+                    # Update or remove the BUY from queue
+                    if match_qty == buy_qty:
+                        # Fully used - remove from queue
+                        buy_queue.pop()
+                    else:
+                        # Partially used - update quantity and amount
+                        remaining_buy_qty = buy_qty - match_qty
+                        buy_queue[-1]['description'] = f"BUY {remaining_buy_qty} {symbol}"
+                        buy_queue[-1]['amount'] = buy_amount_per_share * remaining_buy_qty
+                        break  # Sell is fully matched, move to next sell
 
             # If we have leftover sells without matching buys,
             # these are from 2025 assignments - fetch 2025 history
