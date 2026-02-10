@@ -97,7 +97,7 @@ def fetch_order_history(token, account_id, start_date, end_date):
     return response.json()
 
 def calculate_pl_from_history(start_date=None, end_date=None):
-    """Calculate P&L for given date range (or YTD if not specified)"""
+    """Calculate P&L for given date range (or YTD if not specified) - SIMPLE VERSION"""
     global _history_cache, _cache_time
 
     # Cache only for default YTD call
@@ -111,15 +111,197 @@ def calculate_pl_from_history(start_date=None, end_date=None):
         token = get_access_token()
         account_id = get_account_id(token)
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         if start_date is None:
-            start_date = datetime(now.year, 1, 1).strftime('%Y-%m-%dT%H:%M:%SZ')
+            start_date = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         if end_date is None:
             # Use end of current day (23:59:59 UTC) to capture all transactions today
-            end_date = datetime(now.year, now.month, now.day, 23, 59, 59).strftime('%Y-%m-%dT%H:%M:%SZ')
+            end_date = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
+        # Fetch YTD transactions
         history = fetch_order_history(token, account_id, start_date, end_date)
         transactions = history.get('transactions', [])
+
+        # SIMPLE APPROACH:
+        # 1. Group transactions by symbol
+        # 2. Match BUY and SELL pairs
+        # 3. For each closed pair: P&L = buy_amount + sell_amount
+        # 4. If missing BUY (from 2025 assignment), fetch from 2025
+        # 5. Sum up for YTD and MTD
+
+        by_symbol = {}
+        for tx in transactions:
+            tx_type = tx.get('type', '')
+            sub_type = tx.get('subType', '')
+            if tx_type != 'TRADE' or sub_type != 'TRADE':
+                continue
+
+            net_amount = float(tx.get('netAmount', 0))
+            description = tx.get('description', '')
+            timestamp = tx.get('timestamp', '')
+
+            # Extract symbol (works for both stocks and options)
+            parts = description.split()
+            if len(parts) < 3:
+                continue
+
+            symbol = parts[2]  # e.g., "SOXL" or "SOXL260130P00065000"
+
+            if symbol not in by_symbol:
+                by_symbol[symbol] = {'buys': [], 'sells': [], 'all_transactions': []}
+
+            if 'BUY' in description:
+                by_symbol[symbol]['buys'].append({
+                    'amount': net_amount,
+                    'timestamp': timestamp,
+                    'description': description,
+                    'netAmount': net_amount,
+                    'type': 'stock_pnl'
+                })
+            elif 'SELL' in description:
+                by_symbol[symbol]['sells'].append({
+                    'amount': net_amount,
+                    'timestamp': timestamp,
+                    'description': description,
+                    'netAmount': net_amount,
+                    'type': 'stock_pnl'
+                })
+
+            by_symbol[symbol]['all_transactions'].append({
+                'netAmount': net_amount,
+                'description': description,
+                'timestamp': timestamp
+            })
+
+        # Match buys and sells for closed positions using LIFO (Last In, First Out)
+        closed_positions = []
+        completed_transactions = []
+
+        for symbol, data in by_symbol.items():
+            # Sort by timestamp
+            buys = sorted(data['buys'], key=lambda x: x['timestamp'])
+            sells = sorted(data['sells'], key=lambda x: x['timestamp'])
+
+            # Match pairs using LIFO - match SELLs against MOST RECENT BUYs
+            while buys and sells:
+                sell = sells[0]
+
+                # LIFO: take the MOST recent BUY (last in list)
+                buy = buys[-1]
+
+                # P&L = buy_amount + sell_amount (both are signed)
+                # Assignment premium is already deducted from buy_amount
+                pl = buy['amount'] + sell['amount']
+
+                closed_positions.append({
+                    'symbol': symbol,
+                    'opening': buy,
+                    'closing': sell,
+                    'pl': pl,
+                    'close_date': sell['timestamp']
+                })
+
+                # Add to completed transactions for display
+                completed_transactions.append({
+                    'netAmount': pl,
+                    'description': f"Closed Position: {symbol}",
+                    'timestamp': sell['timestamp'],
+                    'type': 'stock_pnl',
+                    'symbol': symbol
+                })
+
+                # Remove the matched BUY (LIFO - remove from end)
+                buys.pop()
+                # Remove the matched SELL (remove from beginning)
+                sells.pop(0)
+
+            # If we have leftover sells without matching buys,
+            # these are from 2025 assignments - fetch 2025 history
+            while sells:
+                sell = sells[0]
+
+                # Fetch 2025 history to find the opening BUY transaction
+                # The stock was opened by assignment from a put sold in 2025
+                history_2025 = fetch_order_history(
+                    token,
+                    account_id,
+                    datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                    datetime(2025, 12, 31, 23, 59, 59, tzinfo=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+                )
+                transactions_2025 = history_2025.get('transactions', [])
+
+                # Find the matching BUY transaction (assignment) in 2025
+                for tx_2025 in transactions_2025:
+                    desc_2025 = tx_2025.get('description', '')
+                    if symbol in desc_2025 and 'BUY' in desc_2025:
+                        # Check if quantities match
+                        parts_2025 = desc_2025.split()
+                        if len(parts_2025) >= 3:
+                            try:
+                                qty_2025 = int(parts_2025[1])
+                                if qty_2025 == abs(int(sell['description'].split()[1])):
+                                    # Found the opening BUY from assignment
+                                    buy_amount = float(tx_2025.get('netAmount', 0))
+                                    pl = buy_amount + sell['amount']
+
+                                    closed_positions.append({
+                                        'symbol': symbol,
+                                        'opening': {
+                                            'amount': buy_amount,
+                                            'timestamp': tx_2025.get('timestamp', ''),
+                                            'description': desc_2025
+                                        },
+                                        'closing': sell,
+                                        'pl': pl,
+                                        'close_date': sell['timestamp']
+                                    })
+
+                                    completed_transactions.append({
+                                        'netAmount': pl,
+                                        'description': f"Closed Position: {symbol} (opened from 2025 assignment)",
+                                        'timestamp': sell['timestamp'],
+                                        'type': 'stock_pnl',
+                                        'symbol': symbol
+                                    })
+
+                                    print(f"Found 2025 assignment for {symbol}: {desc_2025}")
+                                    break
+                            except:
+                                continue
+
+                sells.pop(0)
+
+        # Calculate YTD and MTD totals
+        now_dt = datetime.now(timezone.utc)
+        current_month = now_dt.month
+        current_year = now_dt.year
+
+        ytd_realized_pl = sum(pos['pl'] for pos in closed_positions)
+        mtd_realized_pl = sum(
+            pos['pl'] for pos in closed_positions
+            if datetime.fromisoformat(pos['close_date'].replace('Z', '+00:00')).month == current_month
+            and datetime.fromisoformat(pos['close_date'].replace('Z', '+00:00')).year == current_year
+        )
+
+        # Calculate unrealized P&L from portfolio
+        total_unrealized_pl = 0
+        # TODO: Fetch portfolio and calculate unrealized
+
+        result = {
+            'total_realized_pl': ytd_realized_pl,
+            'short_term_pl': ytd_realized_pl,
+            'long_term_pl': 0,
+            'total_unrealized_pl': total_unrealized_pl,
+            'total_positions': len(closed_positions),
+            'open_positions': 0,  # TODO: Count open positions
+            'transactions': completed_transactions,
+            'last_updated': now.isoformat()
+        }
+
+        _history_cache = result
+        _cache_time = datetime.now()
+
+        return result
 
         # Fetch Portfolio API to identify currently OPEN positions
         portfolio_response = get(
@@ -635,7 +817,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.24 (FIX: Use actual netAmount for assignment premiums instead of parsed price. Previous: calculated premium as price*shares which missed fees/commissions. Now: uses abs(tx[netAmount]) which matches Public.com cost basis exactly. Example: SOXL assignment now $1,302.63 instead of $1,300.00, matching Public.com.)'
+        'version': '4.0 (COMPLETE REWRITE: Simple P&L calculation. Match BUY/SELL pairs using LIFO. P&L = buy_amount + sell_amount. Assignment cost basis already in BUY amount. For 2025 assignments, fetch 2025 history to find opening BUY.)'
     })
 
 @app.route('/api/debug/stock_trades')
