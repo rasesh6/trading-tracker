@@ -391,34 +391,24 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                 stock_positions[symbol] = []
 
             if trade['side'] == 'BUY':
-                # Check if this BUY matches an assignment
                 amount = trade['amount']
                 original_amount = amount
-                cost_basis_from_portfolio = None
+                cost_basis_source = None
 
-                # Check assignments for this symbol (YTD assignments)
+                # Check if this BUY matches a YTD assignment (need to adjust cost basis)
                 if symbol in assignments_by_symbol:
                     for adj in assignments_by_symbol[symbol]:
-                        # Match by exact quantity
                         if trade['quantity'] == adj['quantity']:
-                            # Adjust cost basis by premium received
+                            # This is a YTD assignment - adjust cost basis
                             cost_adjustment = adj['premium_total']
                             amount = amount + cost_adjustment  # Add premium to reduce negative amount
-                            cost_basis_from_portfolio = 'ytd_assignment'
-                            break  # Use first matching assignment
+                            cost_basis_source = 'ytd_assignment'
+                            break
 
-                # Detect pre-YTD assignments from transaction history itself
-                # If BUY quantity/price matches an assignment pattern, it's a pre-YTD assignment
-                if cost_basis_from_portfolio is None and symbol in assignments_by_symbol:
-                    for adj in assignments_by_symbol[symbol]:
-                        if trade['quantity'] == adj['quantity']:
-                            # Check if cost basis matches: strike * quantity - premium
-                            expected_cost = adj['strike'] * trade['quantity'] - adj['premium_total']
-                            # Allow small floating point difference
-                            if abs(amount - (-expected_cost)) < 1:
-                                # This is a pre-YTD assignment with adjusted cost basis
-                                cost_basis_from_portfolio = 'pre_ytd_assignment'
-                                break
+                # For all other cases (regular buys, pre-YTD assignments already adjusted):
+                # Use the amount as-is from the transaction
+                # Pre-YTD assignments already have adjusted cost basis in the transaction
+                # Regular buys have normal market prices
 
                 stock_positions[symbol].append({
                     'quantity': trade['quantity'],
@@ -427,7 +417,7 @@ def calculate_pl_from_history(start_date=None, end_date=None):
                     'description': trade['description'],
                     'timestamp': trade['timestamp'],
                     'side': 'BUY',  # These are BUY positions for FIFO matching
-                    'cost_basis_source': cost_basis_from_portfolio,
+                    'cost_basis_source': cost_basis_source,
                     'original_quantity': trade['quantity']  # Preserve for completed_transactions
                 })
             else:
